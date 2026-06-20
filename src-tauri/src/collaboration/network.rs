@@ -135,6 +135,8 @@ pub struct PeerInfo {
     pub username: String,
     /// 光标在文档中的当前偏移位置（字节索引）
     pub cursor_position: usize,
+    /// 是否为房间主机（只有主机自身为 true，其余成员为 false）
+    pub is_host: bool,
 }
 
 // ============================================================================
@@ -418,11 +420,13 @@ mod tests {
                 peer_id: "peer-1".to_string(),
                 username: "Alice".to_string(),
                 cursor_position: 10,
+                is_host: true,
             },
             PeerInfo {
                 peer_id: "peer-2".to_string(),
                 username: "Bob".to_string(),
                 cursor_position: 25,
+                is_host: false,
             },
         ];
         let msg = CollaborationMessage::PeerListUpdate { peers };
@@ -435,8 +439,8 @@ mod tests {
             "type": "PeerListUpdate",
             "payload": {
                 "peers": [
-                    {"peer_id": "peer-1", "username": "Alice", "cursor_position": 10},
-                    {"peer_id": "peer-2", "username": "Bob", "cursor_position": 25}
+                    {"peer_id": "peer-1", "username": "Alice", "cursor_position": 10, "is_host": true},
+                    {"peer_id": "peer-2", "username": "Bob", "cursor_position": 25, "is_host": false}
                 ]
             }
         }"#;
@@ -447,9 +451,11 @@ mod tests {
                 assert_eq!(peers[0].peer_id, "peer-1");
                 assert_eq!(peers[0].username, "Alice");
                 assert_eq!(peers[0].cursor_position, 10);
+                assert!(peers[0].is_host, "peer-1 应为房间主机");
                 assert_eq!(peers[1].peer_id, "peer-2");
                 assert_eq!(peers[1].username, "Bob");
                 assert_eq!(peers[1].cursor_position, 25);
+                assert!(!peers[1].is_host, "peer-2 不应为房间主机");
             }
             _ => panic!("应为 PeerListUpdate"),
         }

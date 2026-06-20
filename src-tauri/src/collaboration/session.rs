@@ -220,11 +220,12 @@ pub async fn create_room(
         }
     });
 
-    // 创建主机对等方信息
+    // 创建主机对等方信息（标记为房间主机）
     let host_peer = PeerInfo {
         peer_id: local_peer_id.clone(),
         username: username.to_string(),
         cursor_position: 0,
+        is_host: true,
     };
 
     // 创建并存储会话
@@ -463,54 +464,63 @@ pub async fn join_room(
 /// 向其他对等方发送离开通知，清理 WebSocket 连接，
 /// 重置全局会话状态。
 ///
+/// 主机离开时，会先向所有客户端广播 `HostDisconnected` 消息，
+/// 等待一小段时间确保消息送达，然后再关闭连接和清理会话。
+///
 /// # 返回
 /// - `Ok(())`: 离开成功
 /// - `Err(String)`: 离开失败，返回错误描述
-pub fn leave_room() -> Result<(), String> {
-    let mut session_guard = CURRENT_SESSION.lock().unwrap();
+pub async fn leave_room() -> Result<(), String> {
+    // 第一步：在持有锁的情况下，发送离开消息并清理会话
+    {
+        let mut session_guard = CURRENT_SESSION.lock().unwrap();
 
-    let session = match session_guard.as_ref() {
-        Some(s) => s,
-        None => return Err("当前没有活跃的协作会话".to_string()),
-    };
+        let session = match session_guard.as_ref() {
+            Some(s) => s,
+            None => return Err("当前没有活跃的协作会话".to_string()),
+        };
 
-    // 构造离开通知消息（用于客户端模式）
-    let leave_msg = CollaborationMessage::LeaveNotification {
-        peer_id: session.local_peer_id.clone(),
-        username: session.local_username.clone(),
-    };
-    let leave_json = serialize_message(&leave_msg)?;
+        // 构造离开通知消息（用于客户端模式）
+        let leave_msg = CollaborationMessage::LeaveNotification {
+            peer_id: session.local_peer_id.clone(),
+            username: session.local_username.clone(),
+        };
+        let leave_json = serialize_message(&leave_msg)?;
 
-    // 先通知其他对等方，然后取消后台任务释放端口，最后清除会话
-    if session.is_host {
-        // 主机离开：广播 HostDisconnected 给所有客户端
-        let disconnect_msg = CollaborationMessage::HostDisconnected;
-        let disconnect_json = serialize_message(&disconnect_msg)?;
+        if session.is_host {
+            // 主机离开：广播 HostDisconnected 给所有客户端
+            let disconnect_msg = CollaborationMessage::HostDisconnected;
+            let disconnect_json = serialize_message(&disconnect_msg)?;
 
-        if let Some(ref client_txs) = session.client_txs {
-            let clients = client_txs.lock().unwrap();
-            for (_, tx) in clients.iter() {
-                let _ = tx.send(disconnect_json.clone());
+            if let Some(ref client_txs) = session.client_txs {
+                let clients = client_txs.lock().unwrap();
+                for (_, tx) in clients.iter() {
+                    let _ = tx.send(disconnect_json.clone());
+                }
+            }
+        } else {
+            // 客户端离开：发送 LeaveNotification 给主机
+            if let Some(ref tx) = session.msg_tx {
+                let _ = tx.send(leave_json);
             }
         }
-    } else {
-        // 客户端离开：发送 LeaveNotification 给主机
-        if let Some(ref tx) = session.msg_tx {
-            let _ = tx.send(leave_json);
+
+        // 取消后台任务，释放 TCP 监听端口和通道资源
+        if let Some(ref handle) = session.accept_handle {
+            handle.abort();
         }
-    }
+        if let Some(ref handle) = session.broadcast_handle {
+            handle.abort();
+        }
 
-    // 取消后台任务，释放 TCP 监听端口和通道资源
-    // 注意：必须在此处获取 handles 的所有权，因为在清除 session 后无法再访问
-    if let Some(ref handle) = session.accept_handle {
-        handle.abort();
+        // 重置全局会话状态——这会丢弃 session，释放所有资源
+        *session_guard = None;
     }
-    if let Some(ref handle) = session.broadcast_handle {
-        handle.abort();
-    }
+    // MutexGuard 在此处被释放，允许其他线程访问会话
 
-    // 重置全局会话状态——这会丢弃 session，释放所有资源
-    *session_guard = None;
+    // 等待一小段时间，确保 HostDisconnected 等消息已通过 WebSocket 发送给客户端
+    // 避免因立即清理会话导致消息丢失
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     Ok(())
 }
@@ -1019,6 +1029,7 @@ async fn handle_connection(
                 peer_id: peer_id.clone(),
                 username: client_username.clone(),
                 cursor_position: 0,
+                is_host: false, // 客户端不是主机
             });
             session.peers.clone()
         } else {
@@ -1518,8 +1529,8 @@ mod tests {
     // leave_room 测试
     // ========================================================================
 
-    #[test]
-    fn test_leave_room_no_active_session() {
+    #[tokio::test]
+    async fn test_leave_room_no_active_session() {
         let _test_guard = TEST_MUTEX.lock().unwrap();
         // 清理全局会话
         {
@@ -1527,13 +1538,13 @@ mod tests {
             *guard = None;
         }
 
-        let result = leave_room();
+        let result = leave_room().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("没有活跃"));
     }
 
-    #[test]
-    fn test_leave_room_clears_session() {
+    #[tokio::test]
+    async fn test_leave_room_clears_session() {
         let _test_guard = TEST_MUTEX.lock().unwrap();
         // 清理
         {
@@ -1562,7 +1573,7 @@ mod tests {
 
         assert!(has_active_session());
 
-        let result = leave_room();
+        let result = leave_room().await;
         assert!(result.is_ok());
         assert!(!has_active_session());
     }
@@ -1622,6 +1633,7 @@ mod tests {
                     peer_id: "host-1".to_string(),
                     username: "host".to_string(),
                     cursor_position: 0,
+                    is_host: true,
                 }],
                 local_peer_id: "host-1".to_string(),
                 local_username: "host".to_string(),
@@ -1828,7 +1840,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // 清理
-        leave_room().expect("离开房间应成功");
+        leave_room().await.expect("离开房间应成功");
         assert!(!has_active_session());
     }
 
@@ -1939,7 +1951,7 @@ mod tests {
         // 这里我们解封 send_operation 并验证消息已发送。
 
         // 清理
-        leave_room().expect("离开房间应成功");
+        leave_room().await.expect("离开房间应成功");
     }
 
     /// 测试 leave_room 后会话状态完全清理
@@ -1971,7 +1983,7 @@ mod tests {
         assert!(has_active_session());
 
         // 客户端离开
-        leave_room().expect("离开应成功");
+        leave_room().await.expect("离开应成功");
         assert!(!has_active_session());
 
         // 清理主机会话

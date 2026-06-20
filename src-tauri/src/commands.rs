@@ -194,12 +194,14 @@ pub async fn join_collab_room(
 ///
 /// 通知其他对等方并清理当前协作会话的所有资源。
 /// 如果当前不在协作会话中，此操作无效果。
+/// 主机离开时会广播 HostDisconnected 消息给所有客户端，
+/// 强制所有成员退出房间。
 ///
 /// # 返回
 /// 成功返回 Ok(())，失败返回错误描述字符串
 #[tauri::command]
-pub fn leave_collab_room() -> Result<(), String> {
-    crate::collaboration::session::leave_room()
+pub async fn leave_collab_room() -> Result<(), String> {
+    crate::collaboration::session::leave_room().await
 }
 
 /// 发送编辑操作到协作房间
@@ -279,6 +281,7 @@ pub fn get_collab_status() -> Result<String, String> {
                     "peer_id": p.peer_id,
                     "username": p.username,
                     "cursor_position": p.cursor_position,
+                    "is_host": p.is_host,
                 })).collect::<Vec<_>>(),
                 "local_peer_id": s.local_peer_id,
                 "local_username": s.local_username,

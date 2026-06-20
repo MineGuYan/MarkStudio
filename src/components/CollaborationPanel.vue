@@ -35,6 +35,8 @@ export interface PeerInfo {
   username: string;
   /** 协作者光标位置 */
   cursor_position: number;
+  /** 是否为房间主机 */
+  is_host: boolean;
 }
 
 /** 协作状态 */
@@ -103,12 +105,8 @@ const copiedLabel = ref("");
 
 /** 创建房间对话框错误消息 */
 const createDialogError = ref("");
-/** 创建房间对话框成功消息 */
-const createDialogSuccess = ref("");
 /** 加入房间对话框错误消息 */
 const joinDialogError = ref("");
-/** 加入房间对话框成功消息 */
-const joinDialogSuccess = ref("");
 
 // ==================== 对话框状态 ====================
 
@@ -150,19 +148,6 @@ const joinLoading = ref(false);
 let statusPollTimer: ReturnType<typeof setInterval> | null = null;
 
 // ==================== 方法 ====================
-
-/**
- * 显示错误消息，3 秒后自动清除
- *
- * @param msg - 错误消息文本
- */
-function showError(msg: string): void {
-  errorMessage.value = msg;
-  successMessage.value = "";
-  setTimeout(() => {
-    errorMessage.value = "";
-  }, 5000);
-}
 
 /**
  * 显示成功消息，3 秒后自动清除
@@ -329,6 +314,13 @@ function startStatusPolling(): void {
     try {
       const statusJson = await invoke<string>("get_collab_status");
       const status: CollabStatus = JSON.parse(statusJson);
+
+      // 检测连接是否已断开（如主机关闭了房间）
+      if (!status.connected) {
+        console.warn("[协作] 检测到房间已断开，自动退出");
+        handleLeaveRoom();
+        return;
+      }
 
       // 更新协作者列表
       peers.value = status.peers || [];
@@ -572,11 +564,11 @@ function getUserInitial(username: string): string {
               <span
                 class="collab-panel__user-role"
                 :class="{
-                  'collab-panel__user-role--host': isHost && peer.peer_id === localPeerId,
-                  'collab-panel__user-role--member': !isHost || peer.peer_id !== localPeerId,
+                  'collab-panel__user-role--host': peer.is_host,
+                  'collab-panel__user-role--member': !peer.is_host,
                 }"
               >
-                {{ isHost && peer.peer_id === localPeerId ? "主机" : "成员" }}
+                {{ peer.is_host ? "主机" : "成员" }}
               </span>
             </div>
             <!-- 在线状态指示 -->

@@ -20,6 +20,8 @@ export interface PeerInfo {
   username: string;
   /** 协作者光标位置（字符偏移量） */
   cursor_position: number;
+  /** 是否为房间主机 */
+  is_host: boolean;
 }
 
 // ==================== Props 定义 ====================

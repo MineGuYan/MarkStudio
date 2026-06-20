@@ -360,6 +360,15 @@ function startCollabPolling(): void {
       const statusJson = await invoke<string>("get_collab_status");
       const status = JSON.parse(statusJson);
 
+      // 检测连接是否已断开（如主机关闭了房间）
+      if (!status.connected && collabConnected.value) {
+        console.warn("[协作] 检测到房间已断开，自动退出");
+        collabConnected.value = false;
+        stopCollabPolling();
+        collabPeers.value = [];
+        return;
+      }
+
       // 更新协作者列表
       if (status.peers) {
         collabPeers.value = status.peers;

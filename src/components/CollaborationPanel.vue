@@ -99,6 +99,17 @@ const successMessage = ref("");
 /** 复制反馈文本（为空时不显示） */
 const copiedLabel = ref("");
 
+// ==================== 对话框消息状态 ====================
+
+/** 创建房间对话框错误消息 */
+const createDialogError = ref("");
+/** 创建房间对话框成功消息 */
+const createDialogSuccess = ref("");
+/** 加入房间对话框错误消息 */
+const joinDialogError = ref("");
+/** 加入房间对话框成功消息 */
+const joinDialogSuccess = ref("");
+
 // ==================== 对话框状态 ====================
 
 /** 是否显示创建房间对话框 */
@@ -173,12 +184,15 @@ function showSuccess(msg: string): void {
 async function handleCreateRoom(): Promise<void> {
   // 表单验证
   if (!createForm.username.trim()) {
-    showError("请输入用户名");
+    createDialogError.value = "请输入用户名";
+    setTimeout(() => {
+      createDialogError.value = "";
+    }, 5000);
     return;
   }
 
   createLoading.value = true;
-  errorMessage.value = "";
+  createDialogError.value = "";
 
   try {
     // 调用后端 IPC 创建房间
@@ -206,7 +220,7 @@ async function handleCreateRoom(): Promise<void> {
     // 开始轮询状态
     startStatusPolling();
   } catch (error) {
-    showError(`创建房间失败: ${error}`);
+    createDialogError.value = `创建房间失败: ${error}`;
   } finally {
     createLoading.value = false;
   }
@@ -219,20 +233,29 @@ async function handleCreateRoom(): Promise<void> {
 async function handleJoinRoom(): Promise<void> {
   // 表单验证
   if (!joinForm.host.trim()) {
-    showError("请输入主机 IP 地址");
+    joinDialogError.value = "请输入主机 IP 地址";
+    setTimeout(() => {
+      joinDialogError.value = "";
+    }, 5000);
     return;
   }
   if (!joinForm.roomId.trim()) {
-    showError("请输入房间 ID");
+    joinDialogError.value = "请输入房间 ID";
+    setTimeout(() => {
+      joinDialogError.value = "";
+    }, 5000);
     return;
   }
   if (!joinForm.username.trim()) {
-    showError("请输入用户名");
+    joinDialogError.value = "请输入用户名";
+    setTimeout(() => {
+      joinDialogError.value = "";
+    }, 5000);
     return;
   }
 
   joinLoading.value = true;
-  errorMessage.value = "";
+  joinDialogError.value = "";
 
   try {
     // 调用后端 IPC 加入房间
@@ -261,7 +284,7 @@ async function handleJoinRoom(): Promise<void> {
     // 开始轮询状态
     startStatusPolling();
   } catch (error) {
-    showError(`加入房间失败: ${error}`);
+    joinDialogError.value = `加入房间失败: ${error}`;
   } finally {
     joinLoading.value = false;
   }
@@ -595,6 +618,10 @@ function getUserInitial(username: string): string {
             </button>
           </div>
           <div class="modal__body">
+            <!-- 错误消息提示 -->
+            <div v-if="createDialogError" class="modal__error">
+              {{ createDialogError }}
+            </div>
             <!-- 端口号 -->
             <label class="modal__label">
               端口号
@@ -607,16 +634,6 @@ function getUserInitial(username: string): string {
                 max="65535"
               />
             </label>
-            <!-- 密码 -->
-            <label class="modal__label">
-              密码（可选）
-              <input
-                v-model="createForm.password"
-                type="text"
-                class="modal__input"
-                placeholder="留空则不设密码"
-              />
-            </label>
             <!-- 用户名 -->
             <label class="modal__label">
               用户名
@@ -625,6 +642,16 @@ function getUserInitial(username: string): string {
                 type="text"
                 class="modal__input"
                 placeholder="请输入您的用户名"
+              />
+            </label>
+            <!-- 密码 -->
+            <label class="modal__label">
+              密码（可选）
+              <input
+                v-model="createForm.password"
+                type="text"
+                class="modal__input"
+                placeholder="留空则不设密码"
               />
             </label>
           </div>
@@ -665,6 +692,20 @@ function getUserInitial(username: string): string {
             </button>
           </div>
           <div class="modal__body">
+            <!-- 错误消息提示 -->
+            <div v-if="joinDialogError" class="modal__error">
+              {{ joinDialogError }}
+            </div>
+            <!-- 房间 ID -->
+            <label class="modal__label">
+              房间 ID
+              <input
+                v-model="joinForm.roomId"
+                type="text"
+                class="modal__input"
+                placeholder="请输入房间 ID"
+              />
+            </label>
             <!-- 主机 IP -->
             <label class="modal__label">
               主机 IP 地址
@@ -687,14 +728,14 @@ function getUserInitial(username: string): string {
                 max="65535"
               />
             </label>
-            <!-- 房间 ID -->
+            <!-- 用户名 -->
             <label class="modal__label">
-              房间 ID
+              用户名
               <input
-                v-model="joinForm.roomId"
+                v-model="joinForm.username"
                 type="text"
                 class="modal__input"
-                placeholder="请输入房间 ID"
+                placeholder="请输入您的用户名"
               />
             </label>
             <!-- 密码 -->
@@ -705,16 +746,6 @@ function getUserInitial(username: string): string {
                 type="text"
                 class="modal__input"
                 placeholder="房间有密码时填写"
-              />
-            </label>
-            <!-- 用户名 -->
-            <label class="modal__label">
-              用户名
-              <input
-                v-model="joinForm.username"
-                type="text"
-                class="modal__input"
-                placeholder="请输入您的用户名"
               />
             </label>
           </div>
@@ -1335,6 +1366,22 @@ function getUserInitial(username: string): string {
 .modal__close svg {
   width: 16px;
   height: 16px;
+}
+
+/* Modal 错误消息提示 */
+.modal__error {
+  /* 间距 */
+  padding: 10px 12px;
+
+  /* 样式 */
+  background-color: rgba(231, 76, 60, 0.1);
+  border: 1px solid rgba(231, 76, 60, 0.2);
+  border-radius: 6px;
+
+  /* 字体 */
+  font-size: 13px;
+  color: #e74c3c;
+  line-height: 1.4;
 }
 
 /* Modal 内容区域 */

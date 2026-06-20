@@ -1,0 +1,82 @@
+Date : 2026-06-20 19:10:25
+Directory : e:\Project\Rust\MarkStudio\markstudio
+Total : 36 files,  8636 codes, 1734 comments, 1287 blanks, all 11657 lines
+
+Languages
++--------------------+------------+------------+------------+------------+------------+
+| language           | files      | code       | comment    | blank      | total      |
++--------------------+------------+------------+------------+------------+------------+
+| Rust               |         11 |      3,375 |      1,538 |        632 |      5,545 |
+| vue                |          8 |      3,264 |         78 |        597 |      3,939 |
+| JSON               |          5 |      1,833 |          0 |          5 |      1,838 |
+| TypeScript         |          5 |         77 |         99 |         34 |        210 |
+| CSS                |          1 |         41 |         17 |         10 |         68 |
+| JSON with Comments |          1 |         21 |          2 |          3 |         26 |
+| HTML               |          1 |         13 |          0 |          1 |         14 |
+| XML                |          3 |          8 |          0 |          1 |          9 |
+| Markdown           |          1 |          4 |          0 |          4 |          8 |
++--------------------+------------+------------+------------+------------+------------+
+
+Directories
++------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                                         | files      | code       | comment    | blank      | total      |
++------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                                            |         36 |      8,636 |      1,734 |      1,287 |     11,657 |
+| . (Files)                                                                    |          7 |      1,844 |          9 |         15 |      1,868 |
+| public                                                                       |          2 |          7 |          0 |          1 |          8 |
+| src                                                                          |         14 |      3,361 |        187 |        637 |      4,185 |
+| src (Files)                                                                  |          3 |        608 |         13 |        105 |        726 |
+| src-tauri                                                                    |         13 |      3,424 |      1,538 |        634 |      5,596 |
+| src-tauri (Files)                                                            |          2 |         38 |          0 |          2 |         40 |
+| src-tauri\capabilities                                                       |          1 |         14 |          0 |          1 |         15 |
+| src-tauri\src                                                                |         10 |      3,372 |      1,538 |        631 |      5,541 |
+| src-tauri\src (Files)                                                        |          5 |        425 |        389 |        102 |        916 |
+| src-tauri\src\collaboration                                                  |          5 |      2,947 |      1,149 |        529 |      4,625 |
+| src\assets                                                                   |          1 |          1 |          0 |          0 |          1 |
+| src\components                                                               |          7 |      2,665 |         67 |        496 |      3,228 |
+| src\composables                                                              |          2 |         46 |         90 |         26 |        162 |
+| src\styles                                                                   |          1 |         41 |         17 |         10 |         68 |
++------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++------------------------------------------------------------------------------+--------------------+------------+------------+------------+------------+
+| filename                                                                     | language           | code       | comment    | blank      | total      |
++------------------------------------------------------------------------------+--------------------+------------+------------+------------+------------+
+| e:\Project\Rust\MarkStudio\markstudio\README.md                              | Markdown           |          4 |          0 |          4 |          8 |
+| e:\Project\Rust\MarkStudio\markstudio\index.html                             | HTML               |         13 |          0 |          1 |         14 |
+| e:\Project\Rust\MarkStudio\markstudio\package-lock.json                      | JSON               |      1,749 |          0 |          1 |      1,750 |
+| e:\Project\Rust\MarkStudio\markstudio\package.json                           | JSON               |         25 |          0 |          1 |         26 |
+| e:\Project\Rust\MarkStudio\markstudio\public\tauri.svg                       | XML                |          6 |          0 |          1 |          7 |
+| e:\Project\Rust\MarkStudio\markstudio\public\vite.svg                        | XML                |          1 |          0 |          0 |          1 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\build.rs                     | Rust               |          3 |          0 |          1 |          4 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\capabilities\default.json    | JSON               |         14 |          0 |          1 |         15 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\src\collaboration\mod.rs     | Rust               |          4 |          7 |          2 |         13 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\src\collaboration\network.rs | Rust               |        319 |        167 |         58 |        544 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\src\collaboration\ot.rs      | Rust               |      1,015 |        304 |        112 |      1,431 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\src\collaboration\session.rs | Rust               |      1,176 |        474 |        233 |      1,883 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\src\collaboration\sync.rs    | Rust               |        433 |        197 |        124 |        754 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\src\commands.rs              | Rust               |        177 |        216 |         37 |        430 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\src\database.rs              | Rust               |        113 |        110 |         33 |        256 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\src\lib.rs                   | Rust               |         38 |          3 |          4 |         45 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\src\main.rs                  | Rust               |          4 |          1 |          2 |          7 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\src\parser.rs                | Rust               |         93 |         59 |         26 |        178 |
+| e:\Project\Rust\MarkStudio\markstudio\src-tauri\tauri.conf.json              | JSON               |         35 |          0 |          1 |         36 |
+| e:\Project\Rust\MarkStudio\markstudio\src\App.vue                            | vue                |        599 |         11 |        101 |        711 |
+| e:\Project\Rust\MarkStudio\markstudio\src\assets\vue.svg                     | XML                |          1 |          0 |          0 |          1 |
+| e:\Project\Rust\MarkStudio\markstudio\src\components\CollaborationPanel.vue  | vue                |      1,157 |         25 |        208 |      1,390 |
+| e:\Project\Rust\MarkStudio\markstudio\src\components\CursorOverlay.vue       | vue                |        181 |          4 |         33 |        218 |
+| e:\Project\Rust\MarkStudio\markstudio\src\components\Editor.vue              | vue                |        381 |          3 |         69 |        453 |
+| e:\Project\Rust\MarkStudio\markstudio\src\components\Outline.vue             | vue                |        309 |          8 |         67 |        384 |
+| e:\Project\Rust\MarkStudio\markstudio\src\components\Preview.vue             | vue                |        198 |          1 |         37 |        236 |
+| e:\Project\Rust\MarkStudio\markstudio\src\components\SplitPane.vue           | vue                |        136 |          4 |         40 |        180 |
+| e:\Project\Rust\MarkStudio\markstudio\src\components\Toolbar.vue             | vue                |        303 |         22 |         42 |        367 |
+| e:\Project\Rust\MarkStudio\markstudio\src\composables\useShortcuts.ts        | TypeScript         |         31 |         58 |         17 |        106 |
+| e:\Project\Rust\MarkStudio\markstudio\src\composables\useTheme.ts            | TypeScript         |         15 |         32 |          9 |         56 |
+| e:\Project\Rust\MarkStudio\markstudio\src\main.ts                            | TypeScript         |          4 |          1 |          2 |          7 |
+| e:\Project\Rust\MarkStudio\markstudio\src\styles\themes.css                  | CSS                |         41 |         17 |         10 |         68 |
+| e:\Project\Rust\MarkStudio\markstudio\src\vite-env.d.ts                      | TypeScript         |          5 |          1 |          2 |          8 |
+| e:\Project\Rust\MarkStudio\markstudio\tsconfig.json                          | JSON with Comments |         21 |          2 |          3 |         26 |
+| e:\Project\Rust\MarkStudio\markstudio\tsconfig.node.json                     | JSON               |         10 |          0 |          1 |         11 |
+| e:\Project\Rust\MarkStudio\markstudio\vite.config.ts                         | TypeScript         |         22 |          7 |          4 |         33 |
+| Total                                                                        |                    |      8,636 |      1,734 |      1,287 |     11,657 |
++------------------------------------------------------------------------------+--------------------+------------+------------+------------+------------+

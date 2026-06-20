@@ -54,8 +54,7 @@ fn get_db_path() -> PathBuf {
 
     // 确保 data/ 目录存在，若不存在则创建
     if !data_dir.exists() {
-        std::fs::create_dir_all(&data_dir)
-            .expect("无法创建 data/ 目录，请检查文件系统权限");
+        std::fs::create_dir_all(&data_dir).expect("无法创建 data/ 目录，请检查文件系统权限");
     }
 
     // 返回数据库文件路径
@@ -77,8 +76,7 @@ pub fn get_connection() -> &'static Mutex<Connection> {
         println!("[MarkStudio] 数据库路径: {:?}", db_path);
 
         // 打开数据库连接（如果文件不存在则自动创建）
-        let conn = Connection::open(&db_path)
-            .expect("无法打开 SQLite 数据库，请检查路径和权限");
+        let conn = Connection::open(&db_path).expect("无法打开 SQLite 数据库，请检查路径和权限");
 
         // 初始化数据库表结构
         init_database(&conn);
@@ -236,9 +234,7 @@ pub fn get_recent_files() -> Result<Vec<String>, String> {
 
     // 准备查询语句，按打开时间降序，限制 10 条
     let mut stmt = conn
-        .prepare(
-            "SELECT path FROM recent_files ORDER BY opened_at DESC LIMIT 10",
-        )
+        .prepare("SELECT path FROM recent_files ORDER BY opened_at DESC LIMIT 10")
         .map_err(|e| format!("准备查询语句失败: {}", e))?;
 
     // 执行查询，收集所有路径

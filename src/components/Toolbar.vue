@@ -16,6 +16,8 @@ const props = defineProps<{
   mode: "source" | "preview" | "split";
   /** 当前主题：light 为浅色主题，dark 为深色主题 */
   theme: "light" | "dark";
+  /** 协作连接状态 */
+  collabConnected?: boolean;
 }>();
 
 // ==================== Emits 定义 ====================
@@ -30,6 +32,8 @@ const emit = defineEmits<{
   "open-file": [];
   /** 保存文件 */
   "save-file": [];
+  /** 切换协作面板显示/隐藏 */
+  "toggle-collab": [];
 }>();
 
 // ==================== 方法定义 ====================
@@ -170,6 +174,29 @@ function toggleTheme(): void {
           <span>保存</span>
         </button>
       </div>
+
+      <!-- 分隔线 -->
+      <div class="toolbar-divider" />
+
+      <!-- 协作按钮 -->
+      <button
+        class="toolbar-btn"
+        :class="{ active: collabConnected }"
+        title="协作编辑"
+        @click="emit('toggle-collab')"
+      >
+        <!-- 对话气泡图标 -->
+        <svg
+          class="btn-icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+        <span>协作</span>
+      </button>
 
       <!-- 分隔线 -->
       <div class="toolbar-divider" />

@@ -10,6 +10,7 @@
  * - 调用 extract_outline IPC 获取大纲数据，显示在左侧大纲面板
  * - 通过 useShortcuts 注册快捷键：Ctrl+S 保存、Ctrl+F 查找
  * - 使用防抖优化 IPC 调用频率，避免频繁请求后端
+ * - 集成协作编辑功能：管理协作面板、发送编辑操作和光标位置、轮询远程状态
  */
 
 import { ref, watch, onMounted, onUnmounted } from "vue";
@@ -22,6 +23,7 @@ import Editor from "./components/Editor.vue";
 import Preview from "./components/Preview.vue";
 import SplitPane from "./components/SplitPane.vue";
 import Outline from "./components/Outline.vue";
+import CollaborationPanel from "./components/CollaborationPanel.vue";
 
 // 导入组合式函数
 import { useTheme } from "./composables/useTheme";
@@ -29,6 +31,8 @@ import { useShortcuts } from "./composables/useShortcuts";
 
 // 导入类型
 import type { OutlineItem } from "./components/Outline.vue";
+import type { Operation } from "./components/Editor.vue";
+import type { PeerInfo } from "./components/CursorOverlay.vue";
 
 // ==================== 主题管理 ====================
 
@@ -82,6 +86,32 @@ const outline = ref<OutlineItem[]>([]);
 
 /** 大纲面板是否折叠 */
 const outlineCollapsed = ref<boolean>(false);
+
+// ==================== 协作状态 ====================
+
+/** 协作面板是否可见 */
+const collabPanelVisible = ref<boolean>(false);
+
+/** 是否已连接到协作房间 */
+const collabConnected = ref<boolean>(false);
+
+/** 协作者列表（包含光标位置） */
+const collabPeers = ref<PeerInfo[]>([]);
+
+/** 本地对等方 ID，用于过滤掉自己的光标 */
+const localPeerId = ref<string>("");
+
+/** 编辑器组件引用（source 模式） */
+const sourceEditorRef = ref<InstanceType<typeof Editor> | null>(null);
+
+/** 编辑器组件引用（split 模式 - 左侧） */
+const splitEditorRef = ref<InstanceType<typeof Editor> | null>(null);
+
+/** 协作状态轮询定时器 ID */
+let collabPollTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 上一次轮询获取的文档内容，用于对比变更 */
+let lastPollDocument: string = "";
 
 // ==================== 防抖 IPC 调用 ====================
 
@@ -240,6 +270,135 @@ async function saveFileAs(): Promise<void> {
   }
 }
 
+// ==================== 协作事件处理 ====================
+
+/**
+ * 处理协作面板"连接状态变更"事件
+ *
+ * @param connected - 是否已连接
+ */
+function onCollabConnectionChange(connected: boolean): void {
+  collabConnected.value = connected;
+
+  if (connected) {
+    // 连接成功后开始轮询协作状态
+    startCollabPolling();
+  } else {
+    // 断开后停止轮询
+    stopCollabPolling();
+    collabPeers.value = [];
+  }
+}
+
+/**
+ * 处理协作面板"协作者列表更新"事件
+ *
+ * @param peers - 协作者列表
+ */
+function onCollabPeersUpdate(peers: PeerInfo[]): void {
+  collabPeers.value = peers;
+}
+
+/**
+ * 处理协作面板"文档更新"事件
+ * 当远程文档内容变更时，更新本地编辑器内容
+ *
+ * @param document - 远程文档内容
+ */
+function onCollabDocumentUpdate(document: string): void {
+  // 仅在文档内容确实变化时更新
+  if (document !== content.value) {
+    content.value = document;
+  }
+}
+
+/**
+ * 处理编辑器发出的本地编辑操作
+ * 将 OT 操作序列化为 JSON 并通过 IPC 发送给后端
+ *
+ * @param op - OT 操作对象
+ */
+async function onEditorOperation(op: Operation): Promise<void> {
+  if (!collabConnected.value) return;
+
+  try {
+    const opJson = JSON.stringify(op);
+    await invoke("send_collab_operation", { opJson });
+  } catch (error) {
+    console.error("发送协作操作失败:", error);
+  }
+}
+
+/**
+ * 处理编辑器发出的光标位置变化
+ * 将光标位置通过 IPC 发送给后端
+ *
+ * @param position - 光标字符偏移量
+ */
+async function onEditorCursor(position: number): Promise<void> {
+  if (!collabConnected.value) return;
+
+  try {
+    await invoke("send_collab_cursor", { position });
+  } catch (error) {
+    console.error("发送光标位置失败:", error);
+  }
+}
+
+// ==================== 协作状态轮询 ====================
+
+/**
+ * 开始定期轮询协作状态
+ * 每 500ms 调用一次 get_collab_status IPC 获取最新状态
+ * 包括远程文档变更和协作者状态
+ */
+function startCollabPolling(): void {
+  stopCollabPolling();
+
+  collabPollTimer = setInterval(async () => {
+    try {
+      const statusJson = await invoke<string>("get_collab_status");
+      const status = JSON.parse(statusJson);
+
+      // 更新协作者列表
+      if (status.peers) {
+        collabPeers.value = status.peers;
+      }
+
+      // 更新本地对等方 ID
+      if (status.local_peer_id) {
+        localPeerId.value = status.local_peer_id;
+      }
+
+      // 检查远程文档是否有变更
+      if (
+        status.document !== undefined &&
+        status.document !== lastPollDocument
+      ) {
+        lastPollDocument = status.document;
+        // 如果远程文档内容与本地不同，更新本地内容
+        if (status.document !== content.value) {
+          content.value = status.document;
+        }
+      }
+    } catch (error) {
+      console.error("协作状态轮询失败:", error);
+    }
+  }, 500);
+}
+
+/**
+ * 停止协作状态轮询
+ */
+function stopCollabPolling(): void {
+  if (collabPollTimer !== null) {
+    clearInterval(collabPollTimer);
+    collabPollTimer = null;
+  }
+  lastPollDocument = "";
+  localPeerId.value = "";
+}
+
 // ==================== 监听器 ====================
 
 /**
@@ -308,6 +467,8 @@ onMounted(async () => {
 // 在组件卸载时移除 Ctrl+F 键盘事件，防止内存泄漏
 onUnmounted(() => {
   document.removeEventListener("keydown", handleCtrlF);
+  // 清理协作轮询定时器
+  stopCollabPolling();
 });
 
 // ==================== 大纲导航处理 ====================
@@ -343,14 +504,16 @@ function onOutlineNavigate(line: number): void {
 <template>
   <!-- 应用根容器，使用主题 CSS 变量控制背景色 -->
   <div class="app-container">
-    <!-- 顶部工具栏：模式切换 & 主题切换 & 文件操作 -->
+    <!-- 顶部工具栏：模式切换 & 主题切换 & 文件操作 & 协作 -->
     <Toolbar
       :mode="mode"
       :theme="theme"
+      :collab-connected="collabConnected"
       @update:mode="(val: 'source' | 'preview' | 'split') => mode = val"
       @update:theme="(val: 'light' | 'dark') => theme = val"
       @open-file="openFile"
       @save-file="saveFile"
+      @toggle-collab="collabPanelVisible = !collabPanelVisible"
     />
 
     <!-- 下方主体区域：横向 flex 布局 -->
@@ -387,8 +550,14 @@ function onOutlineNavigate(line: number): void {
         <!-- 源代码编辑模式：仅显示 Markdown 编辑器 -->
         <Editor
           v-if="mode === 'source'"
+          ref="sourceEditorRef"
           v-model="content"
           placeholder="请输入 Markdown 内容..."
+          :collab-enabled="collabConnected"
+          :collab-peers="collabPeers"
+          :local-peer-id="localPeerId"
+          @collab-operation="onEditorOperation"
+          @collab-cursor="onEditorCursor"
         />
 
         <!-- 预览模式：仅显示 Markdown 解析后的 HTML -->
@@ -401,8 +570,14 @@ function onOutlineNavigate(line: number): void {
         <SplitPane v-else>
           <template #left>
             <Editor
+              ref="splitEditorRef"
               v-model="content"
               placeholder="请输入 Markdown 内容..."
+              :collab-enabled="collabConnected"
+              :collab-peers="collabPeers"
+              :local-peer-id="localPeerId"
+              @collab-operation="onEditorOperation"
+              @collab-cursor="onEditorCursor"
             />
           </template>
           <template #right>
@@ -410,6 +585,14 @@ function onOutlineNavigate(line: number): void {
           </template>
         </SplitPane>
       </main>
+
+      <!-- 右侧：协作面板（侧边栏形式） -->
+      <CollaborationPanel
+        v-show="collabPanelVisible"
+        @connection-change="onCollabConnectionChange"
+        @peers-update="onCollabPeersUpdate"
+        @document-update="onCollabDocumentUpdate"
+      />
     </div>
   </div>
 </template>

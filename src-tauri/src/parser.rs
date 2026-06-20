@@ -19,9 +19,8 @@ use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
 /// - 删除线 (strikethrough)
 pub fn parse_markdown_to_html(markdown: &str) -> String {
     // 启用 GFM 扩展语法：表格、任务列表、删除线
-    let options = Options::ENABLE_TABLES
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_STRIKETHROUGH;
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
 
     // 创建 pulldown-cmark 解析器，将 Markdown 文本解析为事件流
     let parser = Parser::new_ext(markdown, options);
@@ -58,9 +57,8 @@ pub struct OutlineItem {
 /// 包含所有标题信息的大纲条目列表（按文档出现顺序排列）
 pub fn extract_outline(markdown: &str) -> Vec<OutlineItem> {
     // 启用 GFM 扩展语法，与 parse_markdown_to_html 保持一致
-    let options = Options::ENABLE_TABLES
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_STRIKETHROUGH;
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
 
     // 创建解析器，返回 (事件, 字节范围) 元组的迭代器
     let mut parser = Parser::new_ext(markdown, options).into_offset_iter();

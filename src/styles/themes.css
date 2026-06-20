@@ -1,0 +1,68 @@
+/**
+ * 主题 CSS 变量定义
+ * 
+ * 本文件定义了浅色主题（light）和深色主题（dark）的所有 CSS 变量。
+ * 通过设置 document.documentElement 的 data-theme 属性来切换主题。
+ * 所有组件中的颜色引用均使用这些 CSS 变量，实现全局主题统一管理。
+ */
+
+/* ==================== 浅色主题（默认主题） ==================== */
+
+:root,
+[data-theme="light"] {
+  /* ---- 基础颜色 ---- */
+  --bg-color: #ffffff;                    /* 页面主背景色 */
+  --text-color: #333333;                  /* 主文字颜色 */
+  --border-color: #e0e0e0;                /* 边框颜色 */
+  --heading-color: #1a1a1a;               /* 标题文字颜色 */
+
+  /* ---- 工具栏颜色 ---- */
+  --toolbar-bg-color: #fafafa;            /* 工具栏背景色 */
+  --button-group-bg: #f0f0f0;             /* 按钮组背景色 */
+  --button-hover-bg: rgba(0, 0, 0, 0.06); /* 按钮悬停背景色 */
+  --button-active-bg: #ffffff;            /* 按钮激活背景色 */
+  --button-active-text: #1a73e8;          /* 按钮激活文字颜色 */
+
+  /* ---- 编辑器颜色 ---- */
+  --editor-bg-color: #ffffff;             /* 编辑器背景色 */
+  --editor-text-color: #333333;           /* 编辑器文字颜色 */
+  --editor-placeholder-color: #999999;    /* 占位文字颜色 */
+
+  /* ---- 预览区颜色 ---- */
+  --preview-bg-color: #ffffff;            /* 预览区背景色 */
+  --code-bg-color: #f5f5f5;              /* 代码块背景色 */
+  --code-text-color: #e74c3c;             /* 行内代码文字颜色 */
+  --blockquote-bg-color: #f8f9fa;         /* 引用块背景色 */
+  --table-stripe-color: #fafafa;          /* 表格斑马纹颜色 */
+  --link-color: #1a73e8;                  /* 链接颜色 */
+}
+
+/* ==================== 深色主题 ==================== */
+
+[data-theme="dark"] {
+  /* ---- 基础颜色 ---- */
+  --bg-color: #1e1e1e;                    /* 页面主背景色 */
+  --text-color: #d4d4d4;                  /* 主文字颜色 */
+  --border-color: #404040;                /* 边框颜色 */
+  --heading-color: #e8e8e8;               /* 标题文字颜色 */
+
+  /* ---- 工具栏颜色 ---- */
+  --toolbar-bg-color: #252526;            /* 工具栏背景色 */
+  --button-group-bg: #3c3c3c;             /* 按钮组背景色 */
+  --button-hover-bg: rgba(255, 255, 255, 0.08); /* 按钮悬停背景色 */
+  --button-active-bg: #3a3a3a;            /* 按钮激活背景色 */
+  --button-active-text: #60a5fa;          /* 按钮激活文字颜色 */
+
+  /* ---- 编辑器颜色 ---- */
+  --editor-bg-color: #1e1e1e;             /* 编辑器背景色 */
+  --editor-text-color: #d4d4d4;           /* 编辑器文字颜色 */
+  --editor-placeholder-color: #6a6a6a;    /* 占位文字颜色 */
+
+  /* ---- 预览区颜色 ---- */
+  --preview-bg-color: #1e1e1e;            /* 预览区背景色 */
+  --code-bg-color: #2d2d2d;              /* 代码块背景色 */
+  --code-text-color: #f48771;             /* 行内代码文字颜色 */
+  --blockquote-bg-color: #2a2a2a;         /* 引用块背景色 */
+  --table-stripe-color: #252525;          /* 表格斑马纹颜色 */
+  --link-color: #60a5fa;                  /* 链接颜色 */
+}

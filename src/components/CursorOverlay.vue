@@ -69,13 +69,23 @@ function getPeerColor(peerId: string): string {
 // ==================== 光标像素位置计算 ====================
 
 /**
+ * 共享的 Canvas 2D 上下文，用于精确测量文本在编辑器字体下的像素宽度
+ *
+ * 使用 Canvas.measureText() 替代手动列宽估算，因为：
+ * 1. 手动估算的 charWidth（8.4px）只是近似值，实际字体度量可能有偏差
+ * 2. 中文字符是双宽字符，但 2×近似值 会放大误差
+ * 3. Canvas.measureText 直接使用浏览器字体引擎，结果精确
+ */
+const measureCanvas = document.createElement("canvas");
+const measureCtx = measureCanvas.getContext("2d")!;
+measureCtx.font =
+  '14px "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", "Monaco", monospace';
+
+/**
  * 计算给定字符偏移量在 textarea 中对应的像素位置
  *
- * 使用"隐藏镜像 div"技术：创建一个与 textarea 样式完全相同的隐藏 div，
- * 将光标位置之前的文本内容渲染其中，并在末尾添加一个 span 标记元素，
- * 通过获取该 span 的 offsetLeft 和 offsetTop 来推算光标的位置。
- *
- * 注意：此函数仅为近似计算，对等宽字体效果最佳。
+ * 使用 Canvas.measureText() 精确测量文本宽度，让浏览器字体引擎
+ * 自动处理等宽字体中不同字符的实际渲染宽度。
  *
  * @param text - 编辑器全部文本内容
  * @param cursorPos - 光标所在的字符偏移量
@@ -91,17 +101,18 @@ function getCursorPixelPosition(
   // 计算光标所在行号（从 0 开始）
   const lines = textBeforeCursor.split("\n");
   const lineIndex = lines.length - 1;
-  // 当前行光标之前的字符数
-  const charInLine = lines[lineIndex]?.length ?? 0;
+  // 当前行光标之前的文本
+  const currentLine = lines[lineIndex] ?? "";
 
-  // 估算行高和字符宽度（等宽字体假设）
-  // 编辑器字体大小为 14px，行高为 1.7，字符宽度约为 8.4px（Cascadia Code 等宽字体）
+  // 使用 Canvas 精确测量当前行文本的像素宽度
+  const lineWidth = measureCtx.measureText(currentLine).width;
+
+  // 行高：编辑器字体大小为 14px，行高为 1.7
   const lineHeight = 14 * 1.7; // 约 23.8px
-  const charWidth = 8.4; // 等宽字体每个字符的近似宽度
 
   // 计算光标像素位置
   // padding 为 16px（top）和 20px（left）
-  const left = 20 + charInLine * charWidth;
+  const left = 20 + lineWidth;
   const top = 16 + lineIndex * lineHeight;
 
   return { left, top };
@@ -143,6 +154,8 @@ const visibleCursors = computed(() => {
         borderColor: cursor.color,
       }"
     >
+      <!-- 光标指示线 -->
+      <div class="cursor-tag__caret" :style="{ backgroundColor: cursor.color }" />
       <!-- 光标标签：显示用户名 -->
       <span
         class="cursor-tag__label"
@@ -150,8 +163,6 @@ const visibleCursors = computed(() => {
       >
         {{ cursor.username }}
       </span>
-      <!-- 光标指示线 -->
-      <div class="cursor-tag__caret" :style="{ backgroundColor: cursor.color }" />
     </div>
   </div>
 </template>
@@ -183,10 +194,11 @@ const visibleCursors = computed(() => {
   /* 绝对定位，由 JS 动态计算位置 */
   position: absolute;
 
-  /* 纵向 flex 布局，让 label 和 caret 紧密堆叠，消除行盒间隙 */
+  /* 横向 flex 布局，让 label 和 caret 处于同一水平位置 */
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
 
   /* 过渡动画，让光标移动更平滑 */
   transition: left 0.1s ease, top 0.1s ease;
@@ -210,18 +222,17 @@ const visibleCursors = computed(() => {
   color: #ffffff;
 
   /* 圆角 */
-  border-radius: 3px 3px 3px 0;
+  border-radius: 3px;
 
   /* 文字不换行 */
   white-space: nowrap;
 }
 
-/* 光标指示线（竖线） */
+/* 光标指示线（竖线），与 label 气泡处于同一水平位置 */
 .cursor-tag__caret {
-  /* 尺寸 */
+  /* 尺寸：高度与编辑器行高一致（14px * 1.7 ≈ 23.8px） */
   width: 2px;
-  height: 18px;
-  margin-left: 0;
+  height: 23.8px;
 
   /* 圆角 */
   border-radius: 1px;

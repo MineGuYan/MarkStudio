@@ -183,11 +183,19 @@ const visibleCursors = computed(() => {
   /* 绝对定位，由 JS 动态计算位置 */
   position: absolute;
 
+  /* 纵向 flex 布局，让 label 和 caret 紧密堆叠，消除行盒间隙 */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+
   /* 过渡动画，让光标移动更平滑 */
   transition: left 0.1s ease, top 0.1s ease;
 
   /* 光标标签不换行 */
   white-space: nowrap;
+
+  /* 半透明，避免遮挡下方文本内容 */
+  opacity: 0.5;
 }
 
 /* 用户名标签 */
@@ -196,7 +204,7 @@ const visibleCursors = computed(() => {
   padding: 1px 6px;
   font-size: 11px;
   font-weight: 600;
-  line-height: 1.6;
+  line-height: 1.3;
 
   /* 文字颜色 */
   color: #ffffff;

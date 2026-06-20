@@ -84,8 +84,24 @@ const previousText = ref<string>(modelValue.value ?? "");
 /** textarea 元素引用，用于获取光标位置 */
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
+/**
+ * textarea 的本地显示值，独立于 modelValue
+ *
+ * 为何需要独立管理：
+ * - 协作模式下，远程操作会更新 modelValue，若直接通过 :value="modelValue" 绑定到 textarea，
+ *   则 IME 组合期间远程操作到达时会覆盖 textarea 内容，强制中断浏览器的 IME 组合会话，
+ *   导致用户正在输入的中文拼音/日文假名等组合文字丢失。
+ * - 通过独立的 textareaValue 管理，组合期间拒绝外部更新，保护 IME 会话完整性。
+ * - 组合结束后，再将本地操作合并到当前 modelValue（可能包含组合期间到达的远程操作），
+ *   确保本地与远程变更均被保留。
+ */
+const textareaValue = ref<string>(modelValue.value ?? "");
+
 /** 是否正在应用远程操作（防止远程操作触发本地事件循环） */
 const applyingRemote = ref(false);
+
+/** 是否正在通过 IME 输入法组合文字（如中文输入法的拼音阶段） */
+const isComposing = ref(false);
 
 /** 上一次发送的光标位置，用于去重，避免重复发送相同位置 */
 const lastEmittedPosition = ref<number>(-1);
@@ -93,13 +109,23 @@ const lastEmittedPosition = ref<number>(-1);
 // ==================== 监听器 ====================
 
 /**
- * 监听 modelValue 外部变化，更新 previousText 快照
- * 当外部（如父组件）直接修改内容时同步快照，避免误生成 OT 操作
+ * 监听 modelValue 外部变化，同步 textareaValue 和 previousText 快照
+ *
+ * 注意：
+ * - IME 组合期间不更新 textareaValue，避免中断浏览器的 IME 组合会话
+ * - IME 组合期间不更新 previousText，保持组合前的文本作为 diff 基准
+ * - 远程操作（applyingRemote=true）时，previousText 由 applyRemoteOperation 负责更新，
+ *   但组合期间同样跳过（见 applyRemoteOperation 中的保护逻辑）
  */
 watch(
   () => modelValue.value,
   (newVal) => {
-    if (!applyingRemote.value) {
+    // IME 组合期间不更新 textarea 显示值，保护 IME 会话不被中断
+    if (!isComposing.value) {
+      textareaValue.value = newVal ?? "";
+    }
+    // IME 组合期间不更新快照，保持组合前的文本作为 diff 基准
+    if (!applyingRemote.value && !isComposing.value) {
       previousText.value = newVal ?? "";
     }
   }
@@ -111,6 +137,15 @@ watch(
  * 处理编辑器 input 事件
  * 对比新旧文本值，生成对应的 OT 操作（Insert 或 Delete）
  *
+ * IME 组合期间的处理策略：
+ * - 不更新 modelValue（避免将中间态拼音传播到父组件）
+ * - 不生成 OT 操作（中间态文本不是最终的中文字符）
+ * - 仅更新 textareaValue（反映 textarea 的实际显示内容）
+ *
+ * 组合结束后的处理策略：
+ * - 将本地 OT 操作应用到当前 modelValue（可能包含组合期间到达的远程操作）
+ * - 合并本地与远程变更，确保两者均被保留
+ *
  * @param event - InputEvent 事件对象
  */
 function handleInput(event: Event): void {
@@ -118,25 +153,35 @@ function handleInput(event: Event): void {
   const newText = target.value;
   const oldText = previousText.value;
 
-  // 更新 v-model 绑定
-  emit("update:modelValue", newText);
+  // 始终更新本地 textarea 显示值
+  textareaValue.value = newText;
 
-  // 仅在协作模式下生成 OT 操作
-  if (!props.collabEnabled || applyingRemote.value) {
-    previousText.value = newText;
+  // IME 组合期间（如中文拼音输入）不更新 modelValue，也不生成 OT 操作
+  // 原因：组合期间的文本是中间态（拼音字母），不是最终的中文字符
+  if (isComposing.value) {
     return;
   }
 
-  // 对比新旧文本，计算操作
-  const op = computeOperation(oldText, newText);
-  if (op) {
-    emit("collabOperation", op);
+  // 协作模式下，将本地操作应用到当前 modelValue（可能包含组合期间到达的远程操作）
+  // 这样做可以保留远程变更，同时应用本地变更，避免数据丢失
+  if (props.collabEnabled && !applyingRemote.value) {
+    const op = computeOperation(oldText, newText);
+    if (op) {
+      const currentModel = modelValue.value ?? "";
+      const mergedText = applyOperationToText(currentModel, op);
+
+      emit("update:modelValue", mergedText);
+      emit("collabOperation", op);
+      previousText.value = mergedText;
+      textareaValue.value = mergedText;
+      handleCursorChange();
+      return;
+    }
   }
 
-  // 更新快照
+  // 非协作模式或无变化：直接更新 modelValue
+  emit("update:modelValue", newText);
   previousText.value = newText;
-
-  // 同步光标位置（输入会导致光标移动，覆盖粘贴等非键盘操作场景）
   handleCursorChange();
 }
 
@@ -206,6 +251,102 @@ function computeOperation(
       text: insertedText,
     },
   };
+}
+
+/**
+ * 处理 IME 输入法组合开始事件
+ * 设置组合状态标志，防止组合期间的 input 事件生成错误的 OT 操作
+ */
+function handleCompositionStart(): void {
+  isComposing.value = true;
+}
+
+/**
+ * 处理 IME 输入法组合结束事件
+ *
+ * 关键设计：在此处主动处理组合结果，而非依赖后续的 input 事件。
+ *
+ * 原因：在 Chrome 等主流浏览器中，IME 组合的最终 input 事件（携带确认后的中文文本）
+ * 在 compositionend 之前触发，此时 isComposing 仍为 true，handleInput 会跳过 OT 操作生成。
+ * 因此必须在 compositionend 中主动处理，否则中文输入永远不会被同步。
+ *
+ * 如果后续 input 事件再次触发（某些浏览器的行为），由于 previousText 已更新，
+ * computeOperation 将返回 null（无差异），不会重复发送 collabOperation。
+ */
+function handleCompositionEnd(): void {
+  isComposing.value = false;
+
+  // 主动处理组合结果，确保中文输入能被同步
+  processCompositionResult();
+}
+
+/**
+ * 处理 IME 组合的最终结果
+ *
+ * 将组合期间积累的文本变更（textarea 中的最终中文文本 vs 组合前的 previousText）
+ * 计算为 OT 操作，合并到当前 modelValue 后 emit。
+ *
+ * 此函数由 handleCompositionEnd 调用，也可能被后续的 input 事件间接触发
+ * （此时 previousText 已更新，computeOperation 返回 null 无副作用）。
+ */
+function processCompositionResult(): void {
+  const textarea = textareaRef.value;
+  if (!textarea) return;
+
+  const newText = textarea.value;
+  const oldText = previousText.value;
+
+  // 无变化则跳过
+  if (newText === oldText) return;
+
+  // 确保 textareaValue 与 DOM 同步
+  textareaValue.value = newText;
+
+  if (props.collabEnabled && !applyingRemote.value) {
+    const op = computeOperation(oldText, newText);
+    if (op) {
+      const currentModel = modelValue.value ?? "";
+      const mergedText = applyOperationToText(currentModel, op);
+
+      emit("update:modelValue", mergedText);
+      emit("collabOperation", op);
+      previousText.value = mergedText;
+      textareaValue.value = mergedText;
+      handleCursorChange();
+      return;
+    }
+  }
+
+  // 非协作模式或无有效操作：直接同步
+  emit("update:modelValue", newText);
+  previousText.value = newText;
+  handleCursorChange();
+}
+
+/**
+ * 将 OT 操作应用到文本上，返回结果文本
+ *
+ * 此函数用于组合结束后将本地编辑操作合并到当前 modelValue 上。
+ * 当 IME 组合期间有远程操作到达时，modelValue 已包含远程变更，
+ * 本地操作需要在此基础上应用，而非直接覆盖。
+ *
+ * @param text - 当前文本（可能包含组合期间到达的远程变更）
+ * @param op - 要应用的 OT 操作
+ * @returns 应用操作后的文本
+ */
+function applyOperationToText(text: string, op: Operation): string {
+  if ("Insert" in op) {
+    return (
+      text.substring(0, op.Insert.position) +
+      op.Insert.text +
+      text.substring(op.Insert.position)
+    );
+  } else {
+    return (
+      text.substring(0, op.Delete.position) +
+      text.substring(op.Delete.position + op.Delete.length)
+    );
+  }
 }
 
 /**
@@ -287,7 +428,7 @@ async function handlePaste(event: ClipboardEvent): Promise<void> {
         const textarea = textareaRef.value;
         if (textarea) {
           const cursorPos = textarea.selectionStart;
-          const currentText = modelValue.value ?? "";
+          const currentText = textareaValue.value ?? "";
           const imageMarkdown = `![image](${filePath})`;
 
           // 在光标位置插入图片引用
@@ -299,6 +440,7 @@ async function handlePaste(event: ClipboardEvent): Promise<void> {
           // 更新编辑器内容
           emit("update:modelValue", newText);
           previousText.value = newText;
+          textareaValue.value = newText;
 
           // 将光标移动到插入图片引用之后
           // 使用 setTimeout 确保 DOM 更新后再设置光标位置
@@ -341,6 +483,11 @@ function readBlobAsBase64(blob: Blob): Promise<string> {
  * 应用远程 OT 操作到本地编辑器
  * 此方法通过 defineExpose 暴露给父组件调用
  *
+ * IME 组合期间的保护：
+ * - 仍然更新 modelValue（确保数据模型包含远程变更）
+ * - 但不更新 previousText（保持组合前的快照，用于组合结束后正确计算 diff）
+ * - textareaValue 由 watch 根据 isComposing 状态决定是否同步
+ *
  * @param op - 远程 OT 操作
  */
 function applyRemoteOperation(op: Operation): void {
@@ -363,9 +510,14 @@ function applyRemoteOperation(op: Operation): void {
     return;
   }
 
-  // 更新文本内容
+  // 更新 modelValue（watch 会根据 isComposing 决定是否同步到 textareaValue）
   modelValue.value = newText;
-  previousText.value = newText;
+
+  // IME 组合期间不更新 previousText，保持组合前的快照
+  // 这样组合结束后 handleInput 可以正确计算本地 diff
+  if (!isComposing.value) {
+    previousText.value = newText;
+  }
 
   // 使用 nextTick 确保 DOM 更新后再重置标志
   setTimeout(() => {
@@ -388,9 +540,11 @@ defineExpose({
     <textarea
       ref="textareaRef"
       class="editor-textarea"
-      :value="modelValue"
+      :value="textareaValue"
       :placeholder="placeholder"
       @input="handleInput"
+      @compositionstart="handleCompositionStart"
+      @compositionend="handleCompositionEnd"
       @paste="handlePaste"
       @select="handleCursorChange"
       @click="handleCursorChange"

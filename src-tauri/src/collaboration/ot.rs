@@ -103,23 +103,23 @@ pub fn transform(op_a: &Operation, op_b: &Operation) -> TransformResult {
         ) => {
             if pos_a <= pos_b {
                 // op_a 在 op_b 之前（或同一位置），op_a 先插入
-                // op_a' 不变，op_b' 的位置需要偏移 op_a 插入文本的长度
+                // op_a' 不变，op_b' 的位置需要偏移 op_a 插入文本的字符数
                 TransformResult::new(
                     Operation::Insert {
                         position: *pos_a,
                         text: text_a.clone(),
                     },
                     Operation::Insert {
-                        position: pos_b + text_a.len(),
+                        position: pos_b + char_count(text_a),
                         text: text_b.clone(),
                     },
                 )
             } else {
                 // op_b 在 op_a 之前，op_b 先插入
-                // op_a' 的位置需要偏移 op_b 插入文本的长度，op_b' 不变
+                // op_a' 的位置需要偏移 op_b 插入文本的字符数，op_b' 不变
                 TransformResult::new(
                     Operation::Insert {
-                        position: pos_a + text_b.len(),
+                        position: pos_a + char_count(text_b),
                         text: text_a.clone(),
                     },
                     Operation::Insert {
@@ -211,14 +211,14 @@ fn transform_insert_delete(
     if insert_pos <= delete_pos {
         // ------------------------------------------------------------
         // 情况 1：插入位置在删除范围之前（或恰好在删除起始位置）
-        // 插入操作不受删除影响，但删除操作的位置需要偏移插入文本的长度
+        // 插入操作不受删除影响，但删除操作的位置需要偏移插入文本的字符数
         // ------------------------------------------------------------
         let insert_op = Operation::Insert {
             position: insert_pos,
             text: insert_text.to_string(),
         };
         let delete_op = Operation::Delete {
-            position: delete_pos + insert_text.len(),
+            position: delete_pos + char_count(insert_text),
             length: delete_len,
         };
         if is_insert_a {
@@ -255,7 +255,7 @@ fn transform_insert_delete(
         };
         let delete_op = Operation::Delete {
             position: delete_pos,
-            length: delete_len + insert_text.len(),
+            length: delete_len + char_count(insert_text),
         };
         if is_insert_a {
             TransformResult::new(insert_op, delete_op)
@@ -403,6 +403,30 @@ fn surviving_delete_range(
     }
 }
 
+/// 计算字符串的字符数（Unicode 标量值数量），而非字节长度。
+///
+/// 对于多字节 UTF-8 字符（如中文），字符数小于字节长度。
+/// 例如："啊" 的字节长度为 3，但字符数为 1。
+#[inline]
+fn char_count(s: &str) -> usize {
+    s.chars().count()
+}
+
+/// 将基于字符的偏移量转换为基于字节的偏移量，用于安全的字符串切片。
+///
+/// # 参数
+/// - `s`: 源字符串
+/// - `char_pos`: 字符偏移量（0 表示第一个字符之前）
+///
+/// # 返回
+/// 对应的字节偏移量。如果 `char_pos` 超出字符串总字符数，则返回字符串的字节长度。
+fn char_to_byte_pos(s: &str, char_pos: usize) -> usize {
+    s.char_indices()
+        .nth(char_pos)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
+}
+
 /// 将单个操作应用到文本上，返回修改后的文本。
 ///
 /// # 参数
@@ -424,9 +448,10 @@ pub fn apply_operation(text: &str, op: &Operation) -> String {
             position,
             text: insert_text,
         } => {
-            // 插入操作：在指定位置之前插入文本
+            // 插入操作：在指定字符位置之前插入文本
             // 需要将原始文本分割为前后两部分，中间插入新文本
-            if *position >= text.len() {
+            let text_char_count = char_count(text);
+            if *position >= text_char_count {
                 // 插入位置在文本末尾或之后，直接追加
                 let mut result = text.to_string();
                 result.push_str(insert_text);
@@ -434,27 +459,33 @@ pub fn apply_operation(text: &str, op: &Operation) -> String {
             } else {
                 // 在文本中间插入
                 let mut result = String::with_capacity(text.len() + insert_text.len());
+                // 将字符位置转换为字节位置，确保在多字节 UTF-8 字符边界上分割
+                let byte_pos = char_to_byte_pos(text, *position);
                 // 前半部分：position 之前的字符
-                result.push_str(&text[..*position]);
+                result.push_str(&text[..byte_pos]);
                 // 插入的文本
                 result.push_str(insert_text);
                 // 后半部分：position 及之后的字符
-                result.push_str(&text[*position..]);
+                result.push_str(&text[byte_pos..]);
                 result
             }
         }
         Operation::Delete { position, length } => {
-            // 删除操作：从指定位置删除指定长度的字符
-            if *position >= text.len() {
+            // 删除操作：从指定字符位置删除指定字符数量的文本
+            let text_char_count = char_count(text);
+            if *position >= text_char_count {
                 // 删除起始位置超出文本范围，直接返回原文本
                 return text.to_string();
             }
-            // 计算实际删除的结束位置（不包含），确保不超出文本范围
-            let end = (*position + *length).min(text.len());
+            // 计算实际删除的结束字符位置（不包含），确保不超出文本范围
+            let char_end = (*position + *length).min(text_char_count);
+            // 将字符位置转换为字节位置，确保在多字节 UTF-8 字符边界上分割
+            let byte_pos = char_to_byte_pos(text, *position);
+            let byte_end = char_to_byte_pos(text, char_end);
             // 拼接删除范围之前和之后的部分
-            let mut result = String::with_capacity(text.len() - (end - *position));
-            result.push_str(&text[..*position]);
-            result.push_str(&text[end..]);
+            let mut result = String::with_capacity(text.len() - (byte_end - byte_pos));
+            result.push_str(&text[..byte_pos]);
+            result.push_str(&text[byte_end..]);
             result
         }
     }

@@ -93,11 +93,13 @@ pub enum CollaborationMessage {
     /// - `peer_id`: 发送方对等方标识
     /// - `file_name`: 图片文件名
     /// - `chunk_index`: 当前分片索引（从 0 开始）
+    /// - `total_chunks`: 总分片数量（用于接收方判断是否所有分片已到达）
     /// - `data_base64`: 分片数据，使用 Base64 编码
     ImageSyncChunk {
         peer_id: String,
         file_name: String,
         chunk_index: u32,
+        total_chunks: u32,
         data_base64: String,
     },
 
@@ -391,6 +393,7 @@ mod tests {
             peer_id: "peer-1".to_string(),
             file_name: "photo.png".to_string(),
             chunk_index: 3,
+            total_chunks: 10,
             data_base64: "SGVsbG8gV29ybGQ=".to_string(),
         };
         assert_roundtrip(&msg);

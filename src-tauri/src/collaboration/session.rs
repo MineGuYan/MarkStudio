@@ -413,6 +413,15 @@ pub async fn join_room(
                                 let mut guard = CURRENT_SESSION.lock().unwrap();
                                 if let Some(ref mut session) = *guard {
                                     session.document = apply_operation(&session.document, &op);
+
+                                    // 操作中可能包含图片引用，尝试将已接收的图片路径替换为本地缓存路径
+                                    // 解决分片先于OT操作到达时，replace_image_paths 在未来得及替换的时序问题
+                                    if let Ok(cache_dir) = crate::collaboration::sync::get_image_cache_dir() {
+                                        session.document = crate::collaboration::sync::replace_image_paths(
+                                            &session.document,
+                                            &cache_dir,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -445,6 +454,76 @@ pub async fn join_room(
                             let mut guard = CURRENT_SESSION.lock().unwrap();
                             *guard = None;
                             break;
+                        }
+
+                        // 图片同步开始——初始化接收缓冲区（预分配空间）
+                        CollaborationMessage::ImageSyncStart {
+                            file_name,
+                            total_chunks,
+                            file_size,
+                            ..
+                        } => {
+                            // 在缓冲区中预创建条目，记录总分片数和文件大小
+                            // 后续分片到达时可直接使用这些信息
+                            let mut buffer = crate::collaboration::sync::image_receive_buffer()
+                                .lock()
+                                .unwrap();
+                            buffer
+                                .entry(file_name.clone())
+                                .or_insert(crate::collaboration::sync::ImageSyncInfo {
+                                    file_name: file_name.clone(),
+                                    total_chunks,
+                                    file_size,
+                                    chunks: vec![Vec::new(); total_chunks as usize],
+                                });
+                        }
+
+                        // 图片分片数据——累积分片，全部到达后重组为完整文件
+                        CollaborationMessage::ImageSyncChunk {
+                            file_name,
+                            chunk_index,
+                            total_chunks,
+                            data_base64,
+                            ..
+                        } => {
+                            use crate::collaboration::sync::receive_image_chunk;
+
+                            match receive_image_chunk(
+                                &file_name,
+                                chunk_index,
+                                total_chunks,
+                                &data_base64,
+                            ) {
+                                Ok(Some(saved_path)) => {
+                                    // 所有分片已到达，图片已保存到缓存目录
+                                    // 将文档中的远程图片路径替换为本地缓存路径
+                                    let cache_dir = crate::collaboration::sync::get_image_cache_dir()
+                                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                    let mut guard = CURRENT_SESSION.lock().unwrap();
+                                    if let Some(ref mut session) = *guard {
+                                        session.document = crate::collaboration::sync::replace_image_paths(
+                                            &session.document,
+                                            &cache_dir,
+                                        );
+                                        // 日志：记录图片同步完成
+                                        eprintln!(
+                                            "[MarkStudio] 协作图片同步完成: {} → {}",
+                                            file_name, saved_path
+                                        );
+                                    }
+                                }
+                                Ok(None) => {
+                                    // 分片尚未到齐，继续等待
+                                }
+                                Err(e) => {
+                                    eprintln!("[MarkStudio] 图片分片接收失败 ({}): {}", file_name, e);
+                                }
+                            }
+                        }
+
+                        // 图片同步结束——在分片处理中已自动检测完成，此处仅记录日志
+                        CollaborationMessage::ImageSyncEnd { file_name, .. } => {
+                            eprintln!("[MarkStudio] 收到图片同步结束通知: {}", file_name);
                         }
 
                         // 心跳等消息无需处理
@@ -1118,11 +1197,22 @@ async fn handle_connection(
                             }
                         };
 
-                        // 应用操作到主机文档
+                        // 应用操作到主机文档，并替换图片路径为本地缓存路径
                         {
                             let mut session_guard = CURRENT_SESSION.lock().unwrap();
                             if let Some(ref mut session) = *session_guard {
                                 session.document = apply_operation(&session.document, &op);
+
+                                // 操作中可能包含图片引用，尝试将已接收的图片路径替换为本地缓存路径
+                                // 解决分片先于OT操作到达时，replace_image_paths 在未来得及替换的时序问题
+                                if let Ok(cache_dir) =
+                                    crate::collaboration::sync::get_image_cache_dir()
+                                {
+                                    session.document = crate::collaboration::sync::replace_image_paths(
+                                        &session.document,
+                                        &cache_dir,
+                                    );
+                                }
                             }
                         }
 
@@ -1226,6 +1316,124 @@ async fn handle_connection(
                         for (_, tx) in clients.iter() {
                             let _ = tx.send(leave_json.clone());
                             let _ = tx.send(peer_list_json.clone());
+                        }
+                    }
+
+                    CollaborationMessage::ImageSyncStart {
+                        peer_id: sender_peer_id,
+                        file_name,
+                        total_chunks,
+                        file_size,
+                    } => {
+                        // 主机自身也需要初始化接收缓冲区，以便后续接收图片分片数据
+                        // 注意：主机作为"服务端"也需要保存图片，否则本地文档无法渲染图片
+                        {
+                            let mut buffer = crate::collaboration::sync::image_receive_buffer()
+                                .lock()
+                                .unwrap();
+                            buffer
+                                .entry(file_name.clone())
+                                .or_insert(crate::collaboration::sync::ImageSyncInfo {
+                                    file_name: file_name.clone(),
+                                    total_chunks,
+                                    file_size,
+                                    chunks: vec![Vec::new(); total_chunks as usize],
+                                });
+                        }
+
+                        // 转发给其他客户端（排除发送者）
+                        let forward_msg = CollaborationMessage::ImageSyncStart {
+                            peer_id: sender_peer_id.clone(),
+                            file_name,
+                            total_chunks,
+                            file_size,
+                        };
+                        let forward_json = serialize_message(&forward_msg).unwrap_or_default();
+                        let clients = client_txs.lock().unwrap();
+                        for (pid, tx) in clients.iter() {
+                            if *pid != sender_peer_id {
+                                let _ = tx.send(forward_json.clone());
+                            }
+                        }
+                    }
+
+                    CollaborationMessage::ImageSyncChunk {
+                        peer_id: sender_peer_id,
+                        file_name,
+                        chunk_index,
+                        total_chunks,
+                        data_base64,
+                    } => {
+                        // 主机自身也需要接收并保存图片分片数据
+                        // 调用 receive_image_chunk 将分片累积到缓冲区，
+                        // 当所有分片到达后自动重组为完整文件并保存到 image_cache 目录
+                        use crate::collaboration::sync::receive_image_chunk;
+                        match receive_image_chunk(
+                            &file_name,
+                            chunk_index,
+                            total_chunks,
+                            &data_base64,
+                        ) {
+                            Ok(Some(saved_path)) => {
+                                // 所有分片已到达，图片已保存到缓存目录
+                                // 将主机文档中的远程图片路径替换为本地缓存路径
+                                let cache_dir = crate::collaboration::sync::get_image_cache_dir()
+                                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                let mut guard = CURRENT_SESSION.lock().unwrap();
+                                if let Some(ref mut session) = *guard {
+                                    session.document = crate::collaboration::sync::replace_image_paths(
+                                        &session.document,
+                                        &cache_dir,
+                                    );
+                                }
+                                eprintln!(
+                                    "[MarkStudio] 主机端协作图片同步完成: {} → {}",
+                                    file_name, saved_path
+                                );
+                            }
+                            Ok(None) => {
+                                // 分片尚未到齐，继续等待
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[MarkStudio] 主机端图片分片接收失败 ({}): {}",
+                                    file_name, e
+                                );
+                            }
+                        }
+
+                        // 转发给其他客户端（排除发送者）
+                        let forward_msg = CollaborationMessage::ImageSyncChunk {
+                            peer_id: sender_peer_id.clone(),
+                            file_name,
+                            chunk_index,
+                            total_chunks,
+                            data_base64,
+                        };
+                        let forward_json = serialize_message(&forward_msg).unwrap_or_default();
+                        let clients = client_txs.lock().unwrap();
+                        for (pid, tx) in clients.iter() {
+                            if *pid != sender_peer_id {
+                                let _ = tx.send(forward_json.clone());
+                            }
+                        }
+                    }
+
+                    CollaborationMessage::ImageSyncEnd {
+                        peer_id: sender_peer_id,
+                        file_name,
+                    } => {
+                        // 主机收到客户端的图片同步完成消息，转发给其他客户端
+                        let forward_msg = CollaborationMessage::ImageSyncEnd {
+                            peer_id: sender_peer_id.clone(),
+                            file_name,
+                        };
+                        let forward_json = serialize_message(&forward_msg).unwrap_or_default();
+                        let clients = client_txs.lock().unwrap();
+                        for (pid, tx) in clients.iter() {
+                            if *pid != sender_peer_id {
+                                let _ = tx.send(forward_json.clone());
+                            }
                         }
                     }
 

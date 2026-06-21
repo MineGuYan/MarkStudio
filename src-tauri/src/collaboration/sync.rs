@@ -56,9 +56,52 @@ pub struct ImageSyncInfo {
 static IMAGE_RECEIVE_BUFFER: std::sync::LazyLock<Mutex<HashMap<String, ImageSyncInfo>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// 获取全局图片接收缓冲区的引用。
+///
+/// 返回 `&Mutex<HashMap<String, ImageSyncInfo>>`，调用方可通过 `.lock()` 获取
+/// 内部 `HashMap` 的读写访问权。用于外部模块（如 session）在收到
+/// `ImageSyncStart` 消息时预初始化缓冲区条目。
+pub fn image_receive_buffer() -> &'static Mutex<HashMap<String, ImageSyncInfo>> {
+    &IMAGE_RECEIVE_BUFFER
+}
+
 // ============================================================================
 // 公共 API
 // ============================================================================
+
+/// 获取图片缓存目录路径（与 `save_image_cache` 使用同一目录）。
+///
+/// 返回项目根目录下的 `data/image_cache` 子目录，如果目录不存在则自动创建。
+/// 在 Tauri 开发模式下，`current_dir()` 返回 `src-tauri/`，
+/// 需要回退到项目根目录以确保路径一致。
+///
+/// # 返回
+/// - `Ok(PathBuf)`: 图片缓存目录的完整路径
+/// - `Err(String)`: 创建失败，返回错误描述
+pub fn get_image_cache_dir() -> Result<PathBuf, String> {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // 开发模式下（cargo run），当前工作目录为 src-tauri/，需要回退到项目根目录
+    let project_root = if current_dir
+        .file_name()
+        .map(|n| n == "src-tauri")
+        .unwrap_or(false)
+    {
+        current_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| current_dir.clone())
+    } else {
+        current_dir
+    };
+
+    let cache_dir = project_root.join("data").join("image_cache");
+
+    // 如果目录不存在则递归创建
+    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("创建图片缓存目录失败: {}", e))?;
+
+    Ok(cache_dir)
+}
 
 /// 获取协作缓存目录路径。
 ///
@@ -198,8 +241,9 @@ pub fn receive_image_chunk(
             }
         }
 
-        // 获取缓存目录并将重组后的文件保存到磁盘
-        let cache_dir = get_collab_cache_dir()?;
+        // 获取图片缓存目录并将重组后的文件保存到磁盘
+        // 使用与发送方相同的 image_cache 目录，确保路径一致
+        let cache_dir = get_image_cache_dir()?;
         let file_path = cache_dir.join(file_name);
 
         std::fs::write(&file_path, &file_data).map_err(|e| format!("保存图片文件失败: {}", e))?;
@@ -257,12 +301,19 @@ pub fn replace_image_paths(markdown: &str, cache_dir: &Path) -> String {
                         let local_path = cache_dir.join(file_name);
                         let local_path_str = local_path.to_string_lossy();
 
-                        // 重构图片引用：保持 alt 文本不变，替换路径
-                        result.push_str("![");
-                        result.push_str(&markdown[i + 2..alt_end_abs]);
-                        result.push_str("](");
-                        result.push_str(&local_path_str);
-                        result.push(')');
+                        // 仅当缓存文件实际存在时才替换路径，
+                        // 防止在图片分片尚未到达时错误地替换为不存在的路径
+                        if local_path.exists() {
+                            // 重构图片引用：保持 alt 文本不变，替换为本地缓存路径
+                            result.push_str("![");
+                            result.push_str(&markdown[i + 2..alt_end_abs]);
+                            result.push_str("](");
+                            result.push_str(&local_path_str);
+                            result.push(')');
+                        } else {
+                            // 文件尚未到达，保持原始路径不变
+                            result.push_str(&markdown[i..=path_end_abs]);
+                        }
 
                         i = path_end_abs + 1; // 跳过 `)`
                         continue;
@@ -599,8 +650,8 @@ mod tests {
         assert_eq!(saved_b, data_b);
 
         // 清理
-        let _ = std::fs::remove_file(&get_collab_cache_dir().unwrap().join("file_a.png"));
-        let _ = std::fs::remove_file(&get_collab_cache_dir().unwrap().join("file_b.png"));
+        let _ = std::fs::remove_file(&get_image_cache_dir().unwrap().join("file_a.png"));
+        let _ = std::fs::remove_file(&get_image_cache_dir().unwrap().join("file_b.png"));
     }
 
     // ========================================================================
@@ -609,29 +660,37 @@ mod tests {
 
     #[test]
     fn test_replace_image_paths_single_image() {
-        let cache_dir = Path::new("/tmp/cache");
+        let temp_dir = std::env::temp_dir().join("ms_test_replace_single");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        // 必须在缓存目录中创建同名文件，replace_image_paths 才会替换路径
+        std::fs::write(temp_dir.join("image.png"), b"fake").unwrap();
+
         let markdown = "这是文本 ![描述](https://example.com/image.png) 更多文本";
 
-        let result = replace_image_paths(markdown, cache_dir);
+        let result = replace_image_paths(markdown, &temp_dir);
 
-        // 使用 Path::join 构建期望路径，确保跨平台路径分隔符一致
         let expected = format!(
             "这是文本 ![描述]({}) 更多文本",
-            cache_dir.join("image.png").display()
+            temp_dir.join("image.png").display()
         );
         assert_eq!(result, expected);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_replace_image_paths_multiple_images() {
-        let cache_dir = Path::new("/tmp/cache");
+        let temp_dir = std::env::temp_dir().join("ms_test_replace_multi");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        std::fs::write(temp_dir.join("1.png"), b"fake").unwrap();
+        std::fs::write(temp_dir.join("2.jpg"), b"fake").unwrap();
+
         let markdown = "![a](http://a.com/1.png) 文本 ![b](http://b.com/2.jpg)";
 
-        let result = replace_image_paths(markdown, cache_dir);
+        let result = replace_image_paths(markdown, &temp_dir);
 
-        // 验证路径已替换为本地缓存路径（使用平台相关的路径分隔符）
-        let expected_path_1 = cache_dir.join("1.png");
-        let expected_path_2 = cache_dir.join("2.jpg");
+        let expected_path_1 = temp_dir.join("1.png");
+        let expected_path_2 = temp_dir.join("2.jpg");
         assert!(
             result.contains(&expected_path_1.to_string_lossy().to_string()),
             "结果应包含路径: {}",
@@ -642,54 +701,75 @@ mod tests {
             "结果应包含路径: {}",
             expected_path_2.display()
         );
-        // 确保原始远程 URL 已被替换
         assert!(!result.contains("http://"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_replace_image_paths_no_images() {
-        let cache_dir = Path::new("/tmp/cache");
-        // 只有普通链接，没有图片引用
+        let temp_dir = std::env::temp_dir().join("ms_test_replace_none");
         let markdown = "这是普通文本，没有图片引用。\n\n还有 [链接](http://example.com) 但不是图片";
 
-        let result = replace_image_paths(markdown, cache_dir);
+        let result = replace_image_paths(markdown, &temp_dir);
 
-        // 普通链接不应被替换，文本应保持不变
         assert_eq!(result, markdown);
     }
 
     #[test]
     fn test_replace_image_paths_local_path() {
-        let cache_dir = Path::new("/tmp/cache");
+        let temp_dir = std::env::temp_dir().join("ms_test_replace_local");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        std::fs::write(temp_dir.join("pic.png"), b"fake").unwrap();
+
         let markdown = "![local](C:/Users/test/pic.png)";
 
-        let result = replace_image_paths(markdown, cache_dir);
+        let result = replace_image_paths(markdown, &temp_dir);
 
-        let expected = cache_dir.join("pic.png");
+        let expected = temp_dir.join("pic.png");
         assert!(
             result.contains(&expected.to_string_lossy().to_string()),
             "结果应包含路径: {}",
             expected.display()
         );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_replace_image_paths_empty_markdown() {
-        let cache_dir = Path::new("/tmp/cache");
-        let result = replace_image_paths("", cache_dir);
+        let temp_dir = std::env::temp_dir().join("ms_test_replace_empty");
+        let result = replace_image_paths("", &temp_dir);
         assert_eq!(result, "");
     }
 
     #[test]
     fn test_replace_image_paths_image_without_alt() {
-        let cache_dir = Path::new("/tmp/cache");
+        let temp_dir = std::env::temp_dir().join("ms_test_replace_noalt");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        std::fs::write(temp_dir.join("photo.png"), b"fake").unwrap();
+
         let markdown = "![](photo.png)";
 
-        let result = replace_image_paths(markdown, cache_dir);
+        let result = replace_image_paths(markdown, &temp_dir);
 
-        // alt 文本为空时也应正确替换
-        let expected = format!("![]({})", cache_dir.join("photo.png").display());
+        let expected = format!("![]({})", temp_dir.join("photo.png").display());
         assert_eq!(result, expected);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// 测试文件不存在时不替换路径的行为（新增）
+    #[test]
+    fn test_replace_image_paths_file_not_exists() {
+        let temp_dir = std::env::temp_dir().join("ms_test_replace_missing");
+        // 不创建文件，确保路径不会被替换
+        let markdown = "![missing](https://example.com/nonexistent.png)";
+
+        let result = replace_image_paths(markdown, &temp_dir);
+
+        // 文件不存在，路径应保持原样
+        assert_eq!(result, markdown);
     }
 
     // ========================================================================

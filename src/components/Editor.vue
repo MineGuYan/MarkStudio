@@ -418,23 +418,17 @@ async function handlePaste(event: ClipboardEvent): Promise<void> {
 
         let filePath: string;
 
-        if (props.collabEnabled) {
-          // 协作模式：保存到临时目录，并通过协作会话发送给对等方
-          filePath = await invoke<string>("save_temp_image", {
-            dataBase64: base64Content,
-            fileName,
-          });
+        // 保存图片到缓存目录（协作与非协作模式统一使用相同目录）
+        filePath = await invoke<string>("save_image_cache", {
+          dataBase64: base64Content,
+          fileName,
+          cacheDir: props.imageCacheDir || null,
+        });
 
-          // 调用后端命令将图片发送给协作对等方
+        // 协作模式下，将图片文件发送给协作对等方
+        if (props.collabEnabled) {
           await invoke("send_collab_image", {
             filePath,
-          });
-        } else {
-          // 非协作模式：保存到用户配置的缓存目录
-          filePath = await invoke<string>("save_image_cache", {
-            dataBase64: base64Content,
-            fileName,
-            cacheDir: props.imageCacheDir || null,
           });
         }
 
@@ -444,28 +438,53 @@ async function handlePaste(event: ClipboardEvent): Promise<void> {
         const textarea = textareaRef.value;
         if (textarea) {
           const cursorPos = textarea.selectionStart;
-          const currentText = textareaValue.value ?? "";
           const normalizedPath = filePath.replace(/\\/g, "/");
           const imageMarkdown = `![image](${normalizedPath})`;
 
-          // 在光标位置插入图片引用
-          const newText =
-            currentText.substring(0, cursorPos) +
-            imageMarkdown +
-            currentText.substring(cursorPos);
+          if (props.collabEnabled) {
+            // 协作模式：通过 OT 管线插入图片 Markdown，确保操作被同步到后端
+            // 不能直接设置 textareaValue，否则会被协作轮询覆盖
+            const op: Operation = {
+              Insert: {
+                position: cursorPos,
+                text: imageMarkdown,
+              },
+            };
 
-          // 更新编辑器内容
-          emit("update:modelValue", newText);
-          previousText.value = newText;
-          textareaValue.value = newText;
+            // 将操作应用到当前 modelValue（合并可能存在的远程变更）
+            const currentModel = modelValue.value ?? "";
+            const mergedText = applyOperationToText(currentModel, op);
 
-          // 将光标移动到插入图片引用之后
-          // 使用 setTimeout 确保 DOM 更新后再设置光标位置
-          setTimeout(() => {
-            textarea.selectionStart = cursorPos + imageMarkdown.length;
-            textarea.selectionEnd = cursorPos + imageMarkdown.length;
-            textarea.focus();
-          }, 0);
+            emit("update:modelValue", mergedText);
+            emit("collabOperation", op);
+            previousText.value = mergedText;
+            textareaValue.value = mergedText;
+
+            // 将光标移动到插入图片引用之后
+            setTimeout(() => {
+              textarea.selectionStart = cursorPos + imageMarkdown.length;
+              textarea.selectionEnd = cursorPos + imageMarkdown.length;
+              textarea.focus();
+            }, 0);
+          } else {
+            // 非协作模式：直接更新文本（无需 OT 管线）
+            const currentText = textareaValue.value ?? "";
+            const newText =
+              currentText.substring(0, cursorPos) +
+              imageMarkdown +
+              currentText.substring(cursorPos);
+
+            emit("update:modelValue", newText);
+            previousText.value = newText;
+            textareaValue.value = newText;
+
+            // 将光标移动到插入图片引用之后
+            setTimeout(() => {
+              textarea.selectionStart = cursorPos + imageMarkdown.length;
+              textarea.selectionEnd = cursorPos + imageMarkdown.length;
+              textarea.focus();
+            }, 0);
+          }
         }
       } catch (err) {
         console.error("图片粘贴失败:", err);

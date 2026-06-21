@@ -406,6 +406,7 @@ pub fn send_collab_image(file_path: String) -> Result<(), String> {
             peer_id: local_peer_id.clone(),
             file_name: file_name.clone(),
             chunk_index: i as u32,
+            total_chunks, // 每个分片都携带总分片数，以便接收方判断是否收齐
             data_base64,
         };
         crate::collaboration::session::send_message(&chunk_msg)?;

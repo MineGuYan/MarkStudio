@@ -2,7 +2,9 @@
 mod collaboration;
 mod commands;
 mod database;
+mod error;
 mod parser;
+mod services;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -39,6 +41,12 @@ pub fn run() {
             commands::get_collab_cache_dir,
             commands::save_temp_image,
             commands::save_image_cache,
+            commands::compute_operation_cmd,
+            commands::apply_operation_cmd,
+            commands::paste_image_cmd,
+            commands::check_dirty_cmd,
+            commands::compute_line_position_cmd,
+            commands::load_all_settings_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

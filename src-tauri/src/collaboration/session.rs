@@ -8,6 +8,8 @@
 //! - **房间管理**：创建/加入/离开协作房间
 //! - **文档同步**：通过 OT 算法同步文档编辑操作
 //! - **消息路由**：处理 WebSocket 消息的接收、分发与广播
+
+#![allow(dead_code)]
 //! - **连接管理**：维护对等方列表，处理心跳与断线
 //!
 //! ## 架构设计
@@ -112,6 +114,12 @@ pub struct CollaborationSession {
 /// 使用 `Mutex` 保护，确保跨线程安全访问。
 static CURRENT_SESSION: Mutex<Option<CollaborationSession>> = Mutex::new(None);
 
+/// 断开连接原因（用于在客户端被强制退出时向前端传递原因）。
+///
+/// 当客户端收到 `HostDisconnected` 消息时，会在此处记录断开原因，
+/// 前端通过 `get_collab_status` 获取此信息并向用户显示提示。
+static DISCONNECT_REASON: Mutex<Option<String>> = Mutex::new(None);
+
 /// 获取全局会话状态的引用。
 ///
 /// # 返回
@@ -128,6 +136,26 @@ pub fn get_session() -> &'static Mutex<Option<CollaborationSession>> {
 /// - `false`：没有活跃会话
 pub fn has_active_session() -> bool {
     CURRENT_SESSION.lock().unwrap().is_some()
+}
+
+/// 获取断开连接的原因（如果有）。
+///
+/// 当客户端被强制退出（如主机关闭房间）时，会记录断开原因。
+/// 前端在轮询检测到 `connected: false` 时，可通过此函数获取原因并向用户展示提示。
+///
+/// # 返回
+/// - `Some(String)`: 断开原因的描述文本
+/// - `None`: 没有记录断开原因（正常离开或尚未断开）
+pub fn get_disconnect_reason() -> Option<String> {
+    DISCONNECT_REASON.lock().unwrap().clone()
+}
+
+/// 清除断开连接原因记录。
+///
+/// 应在正常离开房间或重新创建/加入房间时调用，
+/// 避免残留的原因信息影响后续会话。
+pub fn clear_disconnect_reason() {
+    *DISCONNECT_REASON.lock().unwrap() = None;
 }
 
 // ============================================================================
@@ -245,6 +273,9 @@ pub async fn create_room(
     };
 
     *CURRENT_SESSION.lock().unwrap() = Some(session);
+
+    // 清除之前的断开原因记录（如果有）
+    clear_disconnect_reason();
 
     Ok(RoomInfo {
         room_id,
@@ -367,6 +398,9 @@ pub async fn join_room(
 
             *CURRENT_SESSION.lock().unwrap() = Some(session);
 
+            // 清除之前的断开原因记录（如果有）
+            clear_disconnect_reason();
+
             // 启动后台任务，持续读取主机推送的消息
             // 包括：PeerListUpdate（对等方列表更新）、OperationSync（编辑操作）、
             // CursorSync（光标同步）、LeaveNotification（离开通知）、HostDisconnected 等
@@ -416,11 +450,14 @@ pub async fn join_room(
 
                                     // 操作中可能包含图片引用，尝试将已接收的图片路径替换为本地缓存路径
                                     // 解决分片先于OT操作到达时，replace_image_paths 在未来得及替换的时序问题
-                                    if let Ok(cache_dir) = crate::collaboration::sync::get_image_cache_dir() {
-                                        session.document = crate::collaboration::sync::replace_image_paths(
-                                            &session.document,
-                                            &cache_dir,
-                                        );
+                                    if let Ok(cache_dir) =
+                                        crate::collaboration::sync::get_image_cache_dir()
+                                    {
+                                        session.document =
+                                            crate::collaboration::sync::replace_image_paths(
+                                                &session.document,
+                                                &cache_dir,
+                                            );
                                     }
                                 }
                             }
@@ -449,8 +486,11 @@ pub async fn join_room(
                             }
                         }
 
-                        // 主机断开——清除会话
+                        // 主机断开——记录原因并清除会话
                         CollaborationMessage::HostDisconnected => {
+                            // 记录断开原因，供前端轮询时获取并展示给用户
+                            *DISCONNECT_REASON.lock().unwrap() =
+                                Some("主机关闭了房间，您已被强制退出".to_string());
                             let mut guard = CURRENT_SESSION.lock().unwrap();
                             *guard = None;
                             break;
@@ -468,14 +508,14 @@ pub async fn join_room(
                             let mut buffer = crate::collaboration::sync::image_receive_buffer()
                                 .lock()
                                 .unwrap();
-                            buffer
-                                .entry(file_name.clone())
-                                .or_insert(crate::collaboration::sync::ImageSyncInfo {
+                            buffer.entry(file_name.clone()).or_insert(
+                                crate::collaboration::sync::ImageSyncInfo {
                                     file_name: file_name.clone(),
                                     total_chunks,
                                     file_size,
                                     chunks: vec![Vec::new(); total_chunks as usize],
-                                });
+                                },
+                            );
                         }
 
                         // 图片分片数据——累积分片，全部到达后重组为完整文件
@@ -497,14 +537,16 @@ pub async fn join_room(
                                 Ok(Some(saved_path)) => {
                                     // 所有分片已到达，图片已保存到缓存目录
                                     // 将文档中的远程图片路径替换为本地缓存路径
-                                    let cache_dir = crate::collaboration::sync::get_image_cache_dir()
-                                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                    let cache_dir =
+                                        crate::collaboration::sync::get_image_cache_dir()
+                                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
                                     let mut guard = CURRENT_SESSION.lock().unwrap();
                                     if let Some(ref mut session) = *guard {
-                                        session.document = crate::collaboration::sync::replace_image_paths(
-                                            &session.document,
-                                            &cache_dir,
-                                        );
+                                        session.document =
+                                            crate::collaboration::sync::replace_image_paths(
+                                                &session.document,
+                                                &cache_dir,
+                                            );
                                         // 日志：记录图片同步完成
                                         eprintln!(
                                             "[MarkStudio] 协作图片同步完成: {} → {}",
@@ -516,7 +558,10 @@ pub async fn join_room(
                                     // 分片尚未到齐，继续等待
                                 }
                                 Err(e) => {
-                                    eprintln!("[MarkStudio] 图片分片接收失败 ({}): {}", file_name, e);
+                                    eprintln!(
+                                        "[MarkStudio] 图片分片接收失败 ({}): {}",
+                                        file_name, e
+                                    );
                                 }
                             }
                         }
@@ -1208,10 +1253,11 @@ async fn handle_connection(
                                 if let Ok(cache_dir) =
                                     crate::collaboration::sync::get_image_cache_dir()
                                 {
-                                    session.document = crate::collaboration::sync::replace_image_paths(
-                                        &session.document,
-                                        &cache_dir,
-                                    );
+                                    session.document =
+                                        crate::collaboration::sync::replace_image_paths(
+                                            &session.document,
+                                            &cache_dir,
+                                        );
                                 }
                             }
                         }
@@ -1276,7 +1322,9 @@ async fn handle_connection(
                         // 从客户端发送通道列表中移除该对等方
                         {
                             let mut clients = client_txs.lock().unwrap();
-                            if let Some(pos) = clients.iter().position(|(pid, _)| *pid == sender_peer_id) {
+                            if let Some(pos) =
+                                clients.iter().position(|(pid, _)| *pid == sender_peer_id)
+                            {
                                 clients.remove(pos);
                             }
                         }
@@ -1331,14 +1379,14 @@ async fn handle_connection(
                             let mut buffer = crate::collaboration::sync::image_receive_buffer()
                                 .lock()
                                 .unwrap();
-                            buffer
-                                .entry(file_name.clone())
-                                .or_insert(crate::collaboration::sync::ImageSyncInfo {
+                            buffer.entry(file_name.clone()).or_insert(
+                                crate::collaboration::sync::ImageSyncInfo {
                                     file_name: file_name.clone(),
                                     total_chunks,
                                     file_size,
                                     chunks: vec![Vec::new(); total_chunks as usize],
-                                });
+                                },
+                            );
                         }
 
                         // 转发给其他客户端（排除发送者）
@@ -1381,10 +1429,11 @@ async fn handle_connection(
                                     .unwrap_or_else(|_| std::path::PathBuf::from("."));
                                 let mut guard = CURRENT_SESSION.lock().unwrap();
                                 if let Some(ref mut session) = *guard {
-                                    session.document = crate::collaboration::sync::replace_image_paths(
-                                        &session.document,
-                                        &cache_dir,
-                                    );
+                                    session.document =
+                                        crate::collaboration::sync::replace_image_paths(
+                                            &session.document,
+                                            &cache_dir,
+                                        );
                                 }
                                 eprintln!(
                                     "[MarkStudio] 主机端协作图片同步完成: {} → {}",
@@ -1515,6 +1564,7 @@ async fn handle_connection(
 // ============================================================================
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;

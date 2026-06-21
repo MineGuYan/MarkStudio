@@ -6,6 +6,8 @@
 //! - Markdown 中图片路径的本地化替换
 //! - 协作缓存目录的清理
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -369,6 +371,7 @@ pub fn clear_collab_cache() -> Result<(), String> {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(clippy::needless_borrows_for_generic_args)]
 mod tests {
     use super::*;
     use std::io::Write;

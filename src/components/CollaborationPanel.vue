@@ -57,6 +57,8 @@ export interface CollabStatus {
   local_username: string;
   /** 共享文档内容 */
   document: string;
+  /** 断开连接原因（当 connected 为 false 时，可能包含原因说明） */
+  disconnect_reason: string | null;
 }
 
 // ==================== Props 定义 ====================
@@ -75,6 +77,8 @@ const emit = defineEmits<{
   "peers-update": [peers: PeerInfo[]];
   /** 远程文档内容更新 */
   "document-update": [document: string];
+  /** 本地对等方 ID 更新（用于过滤自己的光标） */
+  "local-peer-id": [peerId: string];
 }>();
 
 // ==================== 状态管理 ====================
@@ -105,11 +109,17 @@ const errorMessage = ref("");
 /** 成功消息 */
 const successMessage = ref("");
 
-/** 标记用户是否正在主动离开房间，用于抑制"主机关闭房间"的误报提示 */
-const isLeavingVoluntarily = ref(false);
-
 /** 复制反馈文本（为空时不显示） */
 const copiedLabel = ref("");
+
+/** 状态轮询定时器 ID（用于清除定时器） */
+let statusPollTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 上一次轮询的文档内容（用于检测文档变化） */
+let lastDocument = "";
+
+/** 轮询间隔（毫秒） */
+const POLL_INTERVAL_MS = 500;
 
 // ==================== 对话框消息状态 ====================
 
@@ -152,11 +162,6 @@ const joinForm = reactive({
 /** 加入房间表单加载状态 */
 const joinLoading = ref(false);
 
-// ==================== 状态轮询 ====================
-
-/** 状态轮询定时器 ID */
-let statusPollTimer: ReturnType<typeof setInterval> | null = null;
-
 // ==================== 方法 ====================
 
 /**
@@ -174,34 +179,39 @@ function showSuccess(msg: string): void {
 
 /**
  * 创建协作房间
- * 调用后端 IPC 命令创建房间，成功后更新连接状态并开始轮询
+ * 调用后端 IPC 命令创建房间，成功后更新连接状态并通知父组件
  */
 async function handleCreateRoom(): Promise<void> {
-  // 表单验证
-  if (!createForm.username.trim()) {
+  createDialogError.value = "";
+
+  // 表单验证：端口号必须在有效范围内
+  if (!createForm.port || createForm.port < 1 || createForm.port > 65535) {
+    createDialogError.value = "请输入有效的端口号（1-65535）";
+    return;
+  }
+
+  // 表单验证：用户名不能为空
+  const trimmedUsername = createForm.username.trim();
+  if (!trimmedUsername) {
     createDialogError.value = "请输入用户名";
-    setTimeout(() => {
-      createDialogError.value = "";
-    }, 5000);
     return;
   }
 
   createLoading.value = true;
-  createDialogError.value = "";
 
   try {
     // 调用后端 IPC 创建房间，基于当前编辑器内容作为协作的初始文档
     const result = await invoke<RoomInfo>("create_collab_room", {
       port: createForm.port,
       password: createForm.password,
-      username: createForm.username.trim(),
+      username: trimmedUsername,
       document: props.currentDocument ?? "",
     });
 
     // 更新房间信息
     roomInfo.value = result;
     isHost.value = true;
-    localUsername.value = createForm.username.trim();
+    localUsername.value = trimmedUsername;
     connectionStatus.value = "connected";
 
     // 关闭对话框
@@ -209,11 +219,11 @@ async function handleCreateRoom(): Promise<void> {
 
     showSuccess("房间创建成功！");
 
-    // 通知父组件连接状态变更
-    emit("connection-change", true);
-
-    // 开始轮询状态
+    // 启动协作状态轮询（获取成员列表和文档同步）
     startStatusPolling();
+
+    // 通知父组件连接状态变更（父组件 App.vue 负责协调状态轮询）
+    emit("connection-change", true);
   } catch (error) {
     createDialogError.value = `创建房间失败: ${error}`;
   } finally {
@@ -223,34 +233,37 @@ async function handleCreateRoom(): Promise<void> {
 
 /**
  * 加入协作房间
- * 调用后端 IPC 命令加入房间，成功后更新连接状态并开始轮询
+ * 调用后端 IPC 命令加入房间，成功后更新连接状态并通知父组件
  */
 async function handleJoinRoom(): Promise<void> {
-  // 表单验证
-  if (!joinForm.host.trim()) {
-    joinDialogError.value = "请输入主机 IP 地址";
-    setTimeout(() => {
-      joinDialogError.value = "";
-    }, 5000);
-    return;
-  }
+  joinDialogError.value = "";
+
+  // 表单验证：房间 ID 不能为空
   if (!joinForm.roomId.trim()) {
     joinDialogError.value = "请输入房间 ID";
-    setTimeout(() => {
-      joinDialogError.value = "";
-    }, 5000);
     return;
   }
-  if (!joinForm.username.trim()) {
+
+  // 表单验证：主机 IP 地址不能为空
+  if (!joinForm.host.trim()) {
+    joinDialogError.value = "请输入主机 IP 地址";
+    return;
+  }
+
+  // 表单验证：端口号必须在有效范围内
+  if (!joinForm.port || joinForm.port < 1 || joinForm.port > 65535) {
+    joinDialogError.value = "请输入有效的端口号（1-65535）";
+    return;
+  }
+
+  // 表单验证：用户名不能为空
+  const trimmedUsername = joinForm.username.trim();
+  if (!trimmedUsername) {
     joinDialogError.value = "请输入用户名";
-    setTimeout(() => {
-      joinDialogError.value = "";
-    }, 5000);
     return;
   }
 
   joinLoading.value = true;
-  joinDialogError.value = "";
 
   try {
     // 调用后端 IPC 加入房间
@@ -259,13 +272,13 @@ async function handleJoinRoom(): Promise<void> {
       port: joinForm.port,
       roomId: joinForm.roomId.trim(),
       password: joinForm.password,
-      username: joinForm.username.trim(),
+      username: trimmedUsername,
     });
 
     // 更新房间信息
     roomInfo.value = result;
     isHost.value = false;
-    localUsername.value = joinForm.username.trim();
+    localUsername.value = trimmedUsername;
     connectionStatus.value = "connected";
 
     // 关闭对话框
@@ -273,11 +286,11 @@ async function handleJoinRoom(): Promise<void> {
 
     showSuccess("成功加入房间！");
 
-    // 通知父组件连接状态变更
-    emit("connection-change", true);
-
-    // 开始轮询状态
+    // 启动协作状态轮询（获取成员列表和文档同步）
     startStatusPolling();
+
+    // 通知父组件连接状态变更（父组件 App.vue 负责协调状态轮询）
+    emit("connection-change", true);
   } catch (error) {
     joinDialogError.value = `加入房间失败: ${error}`;
   } finally {
@@ -290,10 +303,7 @@ async function handleJoinRoom(): Promise<void> {
  * 调用后端 IPC 命令离开房间，清理状态
  */
 async function handleLeaveRoom(): Promise<void> {
-  // 先标记用户正在主动离开，避免轮询检测到"断开"后误报"主机关闭房间"
-  isLeavingVoluntarily.value = true;
-
-  // 先停止轮询，避免在 await 期间轮询触发误判
+  // 先停止轮询，防止在离开过程中触发更新
   stopStatusPolling();
 
   try {
@@ -313,72 +323,89 @@ async function handleLeaveRoom(): Promise<void> {
   // 通知父组件断开连接
   emit("connection-change", false);
   emit("peers-update", []);
-
-  // 重置主动离开标记
-  isLeavingVoluntarily.value = false;
+  emit("local-peer-id", "");
 }
 
 /**
- * 开始定期轮询协作状态
- * 每 500ms 调用 get_collab_status 获取最新状态
+ * 启动协作状态轮询
+ *
+ * 定期调用后端 `get_collab_status` 命令获取最新的协作状态，
+ * 包括成员列表、文档内容、光标位置等，并同步更新本地状态和通知父组件。
+ *
+ * 这是解决"成员列表不显示"和"内容不同步"两个 bug 的关键机制。
  */
 function startStatusPolling(): void {
-  // 清除已有定时器
-  stopStatusPolling();
+  // 避免重复启动
+  if (statusPollTimer !== null) return;
 
   statusPollTimer = setInterval(async () => {
     try {
+      // 调用后端获取协作状态（返回 JSON 字符串）
       const statusJson = await invoke<string>("get_collab_status");
       const status: CollabStatus = JSON.parse(statusJson);
 
-      // 检测连接是否已断开（如主机关闭了房间）
-      // 如果用户正在主动离开，跳过此检测，避免误报"主机关闭房间"
-      if (!status.connected && !isLeavingVoluntarily.value) {
-        console.warn("[协作] 检测到房间已断开，自动退出");
-        errorMessage.value = "主机已关闭房间，您已被强制退出";
-        // 8 秒后自动清除提示信息
-        setTimeout(() => {
-          errorMessage.value = "";
-        }, 8000);
-        handleLeaveRoom();
+      // 如果连接已断开，停止轮询
+      if (!status.connected) {
+        stopStatusPolling();
+        connectionStatus.value = "disconnected";
+        // 如果有断开原因（如主机关闭房间），展示给用户
+        if (status.disconnect_reason) {
+          errorMessage.value = status.disconnect_reason;
+        }
+        emit("connection-change", false);
         return;
       }
 
-      // 更新协作者列表
-      peers.value = status.peers || [];
-      emit("peers-update", peers.value);
+      // 更新成员列表（触发 UI 响应式更新）
+      peers.value = status.peers;
 
-      // 更新本地对等方 ID（用于精确匹配"我"）
-      localPeerId.value = status.local_peer_id || "";
-
-      // 更新房间信息
-      if (roomInfo.value) {
-        roomInfo.value.peer_count = status.peer_count;
+      // 更新本地对等方 ID（用于标记"我"）
+      if (status.local_peer_id !== localPeerId.value) {
+        localPeerId.value = status.local_peer_id;
+        emit("local-peer-id", status.local_peer_id);
       }
 
-      // 如果远程文档有更新，通知父组件
-      if (status.document !== undefined) {
+      // 更新房间人数（roomInfo 中的 peer_count）
+      if (roomInfo.value) {
+        roomInfo.value = {
+          ...roomInfo.value,
+          peer_count: status.peer_count,
+        };
+      }
+
+      // 通知父组件成员列表变更
+      emit("peers-update", status.peers);
+
+      // 仅当文档内容实际变化时，才通知父组件文档更新
+      if (status.document !== lastDocument) {
+        lastDocument = status.document;
         emit("document-update", status.document);
       }
     } catch (error) {
-      console.error("获取协作状态失败:", error);
+      console.error("协作状态轮询失败:", error);
     }
-  }, 500);
+  }, POLL_INTERVAL_MS);
 }
 
 /**
- * 停止状态轮询
+ * 停止协作状态轮询
+ *
+ * 清除定时器，释放资源。
  */
 function stopStatusPolling(): void {
   if (statusPollTimer !== null) {
     clearInterval(statusPollTimer);
     statusPollTimer = null;
   }
+  // 重置文档追踪，确保下次连接后能正确触发首次 document-update
+  lastDocument = "";
 }
 
-// ==================== 生命周期 ====================
+// ==================== 组件卸载清理 ====================
 
-/** 组件卸载时清理定时器 */
+/**
+ * 组件卸载时清理轮询定时器，防止内存泄漏
+ */
 onUnmounted(() => {
   stopStatusPolling();
 });

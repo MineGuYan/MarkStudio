@@ -123,13 +123,34 @@ const lastEmittedPosition = ref<number>(-1);
 watch(
   () => modelValue.value,
   (newVal) => {
+    const textarea = textareaRef.value;
+    const safeValue = newVal ?? "";
+
     // IME 组合期间不更新 textarea 显示值，保护 IME 会话不被中断
     if (!isComposing.value) {
-      textareaValue.value = newVal ?? "";
+      // 保存当前光标/选区位置，用于远程文档同步后恢复
+      // 若 textarea 未挂载或未聚焦，则无需恢复光标
+      const savedStart = textarea?.selectionStart ?? null;
+      const savedEnd = textarea?.selectionEnd ?? null;
+
+      textareaValue.value = safeValue;
+
+      // 恢复光标位置：仅当之前有有效选区且文本长度允许时恢复
+      // 若远程编辑删除了光标之前的文本，将光标 clamp 到新文本末尾
+      if (textarea && savedStart !== null && savedEnd !== null) {
+        const maxPos = safeValue.length;
+        const clampedStart = Math.min(savedStart, maxPos);
+        const clampedEnd = Math.min(savedEnd, maxPos);
+        // 使用 requestAnimationFrame 确保 Vue 的 DOM 更新已完成
+        requestAnimationFrame(() => {
+          textarea.selectionStart = clampedStart;
+          textarea.selectionEnd = clampedEnd;
+        });
+      }
     }
     // IME 组合期间不更新快照，保持组合前的文本作为 diff 基准
     if (!applyingRemote.value && !isComposing.value) {
-      previousText.value = newVal ?? "";
+      previousText.value = safeValue;
     }
   }
 );
@@ -151,7 +172,7 @@ watch(
  *
  * @param event - InputEvent 事件对象
  */
-function handleInput(event: Event): void {
+async function handleInput(event: Event): Promise<void> {
   const target = event.target as HTMLTextAreaElement;
   const newText = target.value;
   const oldText = previousText.value;
@@ -168,13 +189,19 @@ function handleInput(event: Event): void {
   // 协作模式下，将本地操作应用到当前 modelValue（可能包含组合期间到达的远程操作）
   // 这样做可以保留远程变更，同时应用本地变更，避免数据丢失
   if (props.collabEnabled && !applyingRemote.value) {
-    const op = computeOperation(oldText, newText);
-    if (op) {
+    // 调用后端 IPC 计算新旧文本之间的 OT 操作
+    const opsJson = await invoke<string>("compute_operation_cmd", { oldText, newText });
+    const ops: Operation[] = JSON.parse(opsJson);
+    if (ops.length > 0) {
       const currentModel = modelValue.value ?? "";
-      const mergedText = applyOperationToText(currentModel, op);
+      let mergedText = currentModel;
+      // 逐个应用操作到当前模型，合并可能存在的远程变更
+      for (const op of ops) {
+        mergedText = await invoke<string>("apply_operation_cmd", { text: mergedText, opJson: JSON.stringify(op) });
+        emit("collabOperation", op);
+      }
 
       emit("update:modelValue", mergedText);
-      emit("collabOperation", op);
       previousText.value = mergedText;
       textareaValue.value = mergedText;
       handleCursorChange();
@@ -186,74 +213,6 @@ function handleInput(event: Event): void {
   emit("update:modelValue", newText);
   previousText.value = newText;
   handleCursorChange();
-}
-
-/**
- * 计算新旧文本之间的 OT 操作
- *
- * 算法：
- * 1. 找到新旧文本首次出现差异的位置
- * 2. 如果新文本更长 → 在该位置插入了一段文本 → 生成 Insert 操作
- * 3. 如果新文本更短 → 在该位置删除了一段文本 → 生成 Delete 操作
- *
- * @param oldText - 旧文本内容
- * @param newText - 新文本内容
- * @returns OT 操作，如果无变化则返回 null
- */
-function computeOperation(
-  oldText: string,
-  newText: string
-): Operation | null {
-  // 找到第一个不同的字符位置
-  let diffStart = 0;
-  const minLen = Math.min(oldText.length, newText.length);
-  while (diffStart < minLen && oldText[diffStart] === newText[diffStart]) {
-    diffStart++;
-  }
-
-  // 无变化
-  if (diffStart === oldText.length && diffStart === newText.length) {
-    return null;
-  }
-
-  // 计算插入或删除
-  if (newText.length > oldText.length) {
-    // 插入操作：新文本更长，在 diffStart 位置插入了字符
-    const insertedText = newText.substring(diffStart, diffStart + (newText.length - oldText.length));
-    return {
-      Insert: {
-        position: diffStart,
-        text: insertedText,
-      },
-    };
-  } else if (newText.length < oldText.length) {
-    // 删除操作：新文本更短，在 diffStart 位置删除了字符
-    const deletedLength = oldText.length - newText.length;
-    return {
-      Delete: {
-        position: diffStart,
-        length: deletedLength,
-      },
-    };
-  }
-
-  // 长度相同但内容不同 → 替换操作（先删除后插入）
-  const deletedLength = oldText.length - diffStart;
-  const insertedText = newText.substring(diffStart);
-  // 简化处理：返回 Delete + Insert 的组合（分两次 emit）
-  // 先发 Delete，后发 Insert
-  emit("collabOperation", {
-    Delete: {
-      position: diffStart,
-      length: deletedLength,
-    },
-  });
-  return {
-    Insert: {
-      position: diffStart,
-      text: insertedText,
-    },
-  };
 }
 
 /**
@@ -274,7 +233,7 @@ function handleCompositionStart(): void {
  * 因此必须在 compositionend 中主动处理，否则中文输入永远不会被同步。
  *
  * 如果后续 input 事件再次触发（某些浏览器的行为），由于 previousText 已更新，
- * computeOperation 将返回 null（无差异），不会重复发送 collabOperation。
+ * 后端将返回空操作数组（无差异），不会重复发送 collabOperation。
  */
 function handleCompositionEnd(): void {
   isComposing.value = false;
@@ -287,12 +246,12 @@ function handleCompositionEnd(): void {
  * 处理 IME 组合的最终结果
  *
  * 将组合期间积累的文本变更（textarea 中的最终中文文本 vs 组合前的 previousText）
- * 计算为 OT 操作，合并到当前 modelValue 后 emit。
+ * 通过后端 IPC 计算 OT 操作，合并到当前 modelValue 后 emit。
  *
  * 此函数由 handleCompositionEnd 调用，也可能被后续的 input 事件间接触发
- * （此时 previousText 已更新，computeOperation 返回 null 无副作用）。
+ * （此时 previousText 已更新，后端返回空操作数组无副作用）。
  */
-function processCompositionResult(): void {
+async function processCompositionResult(): Promise<void> {
   const textarea = textareaRef.value;
   if (!textarea) return;
 
@@ -306,13 +265,19 @@ function processCompositionResult(): void {
   textareaValue.value = newText;
 
   if (props.collabEnabled && !applyingRemote.value) {
-    const op = computeOperation(oldText, newText);
-    if (op) {
+    // 调用后端 IPC 计算新旧文本之间的 OT 操作
+    const opsJson = await invoke<string>("compute_operation_cmd", { oldText, newText });
+    const ops: Operation[] = JSON.parse(opsJson);
+    if (ops.length > 0) {
       const currentModel = modelValue.value ?? "";
-      const mergedText = applyOperationToText(currentModel, op);
+      let mergedText = currentModel;
+      // 逐个应用操作到当前模型，合并可能存在的远程变更
+      for (const op of ops) {
+        mergedText = await invoke<string>("apply_operation_cmd", { text: mergedText, opJson: JSON.stringify(op) });
+        emit("collabOperation", op);
+      }
 
       emit("update:modelValue", mergedText);
-      emit("collabOperation", op);
       previousText.value = mergedText;
       textareaValue.value = mergedText;
       handleCursorChange();
@@ -324,32 +289,6 @@ function processCompositionResult(): void {
   emit("update:modelValue", newText);
   previousText.value = newText;
   handleCursorChange();
-}
-
-/**
- * 将 OT 操作应用到文本上，返回结果文本
- *
- * 此函数用于组合结束后将本地编辑操作合并到当前 modelValue 上。
- * 当 IME 组合期间有远程操作到达时，modelValue 已包含远程变更，
- * 本地操作需要在此基础上应用，而非直接覆盖。
- *
- * @param text - 当前文本（可能包含组合期间到达的远程变更）
- * @param op - 要应用的 OT 操作
- * @returns 应用操作后的文本
- */
-function applyOperationToText(text: string, op: Operation): string {
-  if ("Insert" in op) {
-    return (
-      text.substring(0, op.Insert.position) +
-      op.Insert.text +
-      text.substring(op.Insert.position)
-    );
-  } else {
-    return (
-      text.substring(0, op.Delete.position) +
-      text.substring(op.Delete.position + op.Delete.length)
-    );
-  }
 }
 
 /**
@@ -416,75 +355,55 @@ async function handlePaste(event: ClipboardEvent): Promise<void> {
         const ext = item.type.split("/")[1] || "png";
         const fileName = `paste_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`;
 
-        let filePath: string;
-
-        // 保存图片到缓存目录（协作与非协作模式统一使用相同目录）
-        filePath = await invoke<string>("save_image_cache", {
-          dataBase64: base64Content,
-          fileName,
-          cacheDir: props.imageCacheDir || null,
-        });
-
-        // 协作模式下，将图片文件发送给协作对等方
-        if (props.collabEnabled) {
-          await invoke("send_collab_image", {
-            filePath,
-          });
-        }
-
-        // 在光标位置插入 Markdown 图片语法
-        // 注意：必须将路径中的反斜杠替换为正斜杠，因为 Markdown 中 \ 是转义字符，
+        // 调用后端 IPC 统一处理图片粘贴（保存图片、更新内容、生成 OT 操作）
+        // 注意：将路径中的反斜杠替换为正斜杠，因为 Markdown 中 \ 是转义字符，
         // 如果不替换，pulldown-cmark 会将 \图、\T 等转义处理，导致路径错误
         const textarea = textareaRef.value;
         if (textarea) {
           const cursorPos = textarea.selectionStart;
-          const normalizedPath = filePath.replace(/\\/g, "/");
-          const imageMarkdown = `![image](${normalizedPath})`;
+          const content = modelValue.value ?? "";
 
-          if (props.collabEnabled) {
-            // 协作模式：通过 OT 管线插入图片 Markdown，确保操作被同步到后端
-            // 不能直接设置 textareaValue，否则会被协作轮询覆盖
-            const op: Operation = {
-              Insert: {
-                position: cursorPos,
-                text: imageMarkdown,
-              },
-            };
+          const resultJson = await invoke<string>("paste_image_cmd", {
+            base64Data: base64Content,
+            fileName,
+            content,
+            cursorPos,
+            cacheDir: props.imageCacheDir || null,
+            collabEnabled: props.collabEnabled,
+          });
 
-            // 将操作应用到当前 modelValue（合并可能存在的远程变更）
-            const currentModel = modelValue.value ?? "";
-            const mergedText = applyOperationToText(currentModel, op);
+          const result = JSON.parse(resultJson);
+          const newContent: string = result.new_content;
+          const newFilePath: string = result.file_path;
+          const operationJson: string | null = result.operation_json;
 
-            emit("update:modelValue", mergedText);
+          // 更新文档内容
+          emit("update:modelValue", newContent);
+          previousText.value = newContent;
+          textareaValue.value = newContent;
+
+          // 协作模式下，发送 OT 操作给其他对等方
+          // 注意：operation_json 是单个 Operation 对象的 JSON 字符串，不是数组
+          if (props.collabEnabled && operationJson) {
+            const op: Operation = JSON.parse(operationJson);
             emit("collabOperation", op);
-            previousText.value = mergedText;
-            textareaValue.value = mergedText;
 
-            // 将光标移动到插入图片引用之后
-            setTimeout(() => {
-              textarea.selectionStart = cursorPos + imageMarkdown.length;
-              textarea.selectionEnd = cursorPos + imageMarkdown.length;
-              textarea.focus();
-            }, 0);
-          } else {
-            // 非协作模式：直接更新文本（无需 OT 管线）
-            const currentText = textareaValue.value ?? "";
-            const newText =
-              currentText.substring(0, cursorPos) +
-              imageMarkdown +
-              currentText.substring(cursorPos);
-
-            emit("update:modelValue", newText);
-            previousText.value = newText;
-            textareaValue.value = newText;
-
-            // 将光标移动到插入图片引用之后
-            setTimeout(() => {
-              textarea.selectionStart = cursorPos + imageMarkdown.length;
-              textarea.selectionEnd = cursorPos + imageMarkdown.length;
-              textarea.focus();
-            }, 0);
+            // 同时发送图片文件给协作对等方（OT 操作只同步文本引用，图片文件需要单独传输）
+            try {
+              await invoke("send_collab_image", { filePath: newFilePath });
+            } catch (err) {
+              console.error("发送协作图片失败:", err);
+            }
           }
+
+          // 将光标移动到插入图片引用之后
+          const normalizedPath = newFilePath.replace(/\\/g, "/");
+          const imageMarkdown = `![image](${normalizedPath})`;
+          setTimeout(() => {
+            textarea.selectionStart = cursorPos + imageMarkdown.length;
+            textarea.selectionEnd = cursorPos + imageMarkdown.length;
+            textarea.focus();
+          }, 0);
         }
       } catch (err) {
         console.error("图片粘贴失败:", err);

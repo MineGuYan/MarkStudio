@@ -124,12 +124,6 @@ const sourceEditorRef = ref<InstanceType<typeof Editor> | null>(null);
 /** 编辑器组件引用（split 模式 - 左侧） */
 const splitEditorRef = ref<InstanceType<typeof Editor> | null>(null);
 
-/** 协作状态轮询定时器 ID */
-let collabPollTimer: ReturnType<typeof setInterval> | null = null;
-
-/** 上一次轮询获取的文档内容，用于对比变更 */
-let lastPollDocument: string = "";
-
 // ==================== 设置面板状态 ====================
 
 /** 设置面板是否可见 */
@@ -383,12 +377,8 @@ async function saveFileAs(): Promise<void> {
 function onCollabConnectionChange(connected: boolean): void {
   collabConnected.value = connected;
 
-  if (connected) {
-    // 连接成功后开始轮询协作状态
-    startCollabPolling();
-  } else {
-    // 断开后停止轮询
-    stopCollabPolling();
+  if (!connected) {
+    // 断开后清空协作者列表
     collabPeers.value = [];
   }
 }
@@ -400,6 +390,16 @@ function onCollabConnectionChange(connected: boolean): void {
  */
 function onCollabPeersUpdate(peers: PeerInfo[]): void {
   collabPeers.value = peers;
+}
+
+/**
+ * 处理协作面板"本地对等方 ID 更新"事件
+ * 用于 CursorOverlay 过滤掉自己的光标
+ *
+ * @param peerId - 本地对等方 ID
+ */
+function onCollabLocalPeerId(peerId: string): void {
+  localPeerId.value = peerId;
 }
 
 /**
@@ -448,69 +448,6 @@ async function onEditorCursor(position: number): Promise<void> {
   }
 }
 
-// ==================== 协作状态轮询 ====================
-
-/**
- * 开始定期轮询协作状态
- * 每 500ms 调用一次 get_collab_status IPC 获取最新状态
- * 包括远程文档变更和协作者状态
- */
-function startCollabPolling(): void {
-  stopCollabPolling();
-
-  collabPollTimer = setInterval(async () => {
-    try {
-      const statusJson = await invoke<string>("get_collab_status");
-      const status = JSON.parse(statusJson);
-
-      // 检测连接是否已断开（如主机关闭了房间）
-      if (!status.connected && collabConnected.value) {
-        console.warn("[协作] 检测到房间已断开，自动退出");
-        collabConnected.value = false;
-        stopCollabPolling();
-        collabPeers.value = [];
-        return;
-      }
-
-      // 更新协作者列表
-      if (status.peers) {
-        collabPeers.value = status.peers;
-      }
-
-      // 更新本地对等方 ID
-      if (status.local_peer_id) {
-        localPeerId.value = status.local_peer_id;
-      }
-
-      // 检查远程文档是否有变更
-      if (
-        status.document !== undefined &&
-        status.document !== lastPollDocument
-      ) {
-        lastPollDocument = status.document;
-        // 如果远程文档内容与本地不同，更新本地内容
-        if (status.document !== content.value) {
-          content.value = status.document;
-        }
-      }
-    } catch (error) {
-      console.error("协作状态轮询失败:", error);
-    }
-  }, 500);
-}
-
-/**
- * 停止协作状态轮询
- */
-function stopCollabPolling(): void {
-  if (collabPollTimer !== null) {
-    clearInterval(collabPollTimer);
-    collabPollTimer = null;
-  }
-  lastPollDocument = "";
-  localPeerId.value = "";
-}
-
 // ==================== 监听器 ====================
 
 /**
@@ -540,13 +477,16 @@ watch(
 );
 
 /**
- * 监听 Markdown 内容变化，追踪文档是否被修改（脏状态）
- * 与最近一次保存/打开时的内容对比，判断是否需要保存
+ * 监听 Markdown 内容变化，通过后端 check_dirty_cmd 对比当前内容与保存时的内容
+ * 判断文档是否已被修改（脏状态）
  */
 watch(
   () => content.value,
-  (newContent) => {
-    isDirty.value = newContent !== lastSavedContent;
+  async (newContent) => {
+    isDirty.value = await invoke("check_dirty_cmd", {
+      current: newContent,
+      saved: lastSavedContent,
+    });
   }
 );
 
@@ -574,27 +514,15 @@ function handleCtrlF(e: KeyboardEvent): void {
 onMounted(async () => {
   document.addEventListener("keydown", handleCtrlF);
 
-  // 从 SQLite 数据库加载持久化的主题偏好
+  // 从后端批量加载所有持久化设置
   try {
-    const savedTheme = await invoke<string | null>("get_setting", {
-      key: "theme",
-    });
-    if (savedTheme && (savedTheme === "light" || savedTheme === "dark")) {
-      theme.value = savedTheme;
+    const settingsJson = await invoke<string>("load_all_settings_cmd");
+    const settings = JSON.parse(settingsJson);
+    if (settings.theme) {
+      theme.value = settings.theme as "light" | "dark";
     }
-  } catch (e) {
-    console.error("加载主题设置失败:", e);
-  }
-
-  // 从 SQLite 数据库加载图片缓存目录设置
-  try {
-    const savedCacheDir = await invoke<string | null>("get_setting", {
-      key: "image_cache_dir",
-    });
-    if (savedCacheDir && savedCacheDir.trim()) {
-      imageCacheDir.value = savedCacheDir;
-    } else {
-      imageCacheDir.value = DEFAULT_IMAGE_CACHE_DIR;
+    if (settings.image_cache_dir) {
+      imageCacheDir.value = settings.image_cache_dir;
     }
     // 同步更新 settingsCategories 中对应设置项的 value
     const generalCategory = settingsCategories.value.find(
@@ -609,8 +537,7 @@ onMounted(async () => {
       }
     }
   } catch (e) {
-    console.error("加载图片缓存目录设置失败:", e);
-    imageCacheDir.value = DEFAULT_IMAGE_CACHE_DIR;
+    console.error("加载设置失败:", e);
   }
 
   // 注册窗口关闭事件拦截器：当文档未保存时弹出确认弹窗
@@ -664,8 +591,6 @@ onMounted(async () => {
 // 在组件卸载时移除 Ctrl+F 键盘事件，防止内存泄漏
 onUnmounted(() => {
   document.removeEventListener("keydown", handleCtrlF);
-  // 清理协作轮询定时器
-  stopCollabPolling();
   // 取消窗口关闭事件监听
   if (unlistenCloseRequested !== null) {
     unlistenCloseRequested();
@@ -681,19 +606,18 @@ onUnmounted(() => {
  *
  * @param line - 目标行号（从 1 开始）
  */
-function onOutlineNavigate(line: number): void {
+async function onOutlineNavigate(line: number): Promise<void> {
+  // 通过后端计算目标行在文本中的字符起始位置
+  const charIndex: number = await invoke("compute_line_position_cmd", {
+    content: content.value,
+    lineNumber: line,
+  });
+
   // 查找编辑器文本域
   const textarea = document.querySelector<HTMLTextAreaElement>(".editor-textarea");
   if (!textarea) return;
 
-  // 计算目标行在文本中的字符起始位置
-  const lines = content.value.split("\n");
-  let charIndex = 0;
-  for (let i = 0; i < Math.min(line - 1, lines.length); i++) {
-    charIndex += lines[i].length + 1; // +1 为换行符
-  }
-
-  // 聚焦编辑器并将光标移动到目标行
+  // 聚焦编辑器并将光标移动到目标位置
   textarea.focus();
   textarea.setSelectionRange(charIndex, charIndex);
 
@@ -798,6 +722,7 @@ function onOutlineNavigate(line: number): void {
         @connection-change="onCollabConnectionChange"
         @peers-update="onCollabPeersUpdate"
         @document-update="onCollabDocumentUpdate"
+        @local-peer-id="onCollabLocalPeerId"
       />
     </div>
 

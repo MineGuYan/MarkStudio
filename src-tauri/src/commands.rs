@@ -37,39 +37,7 @@ pub fn parse_markdown(markdown: String) -> String {
 /// `Result<String, String>` - 成功时返回文件内容，失败时返回错误描述
 #[tauri::command]
 pub fn read_file(path: String) -> Result<String, String> {
-    // 先以原始字节形式读取文件，避免编码问题导致读取失败
-    let bytes = std::fs::read(&path).map_err(|e| format!("读取文件失败: {}", e))?;
-
-    // 策略 1：尝试按 UTF-8 解码
-    if let Ok(content) = String::from_utf8(bytes.clone()) {
-        return Ok(content);
-    }
-
-    // 策略 2：检测 BOM（字节顺序标记）来判断编码
-    if let Some((encoding, bom_length)) = encoding_rs::Encoding::for_bom(&bytes) {
-        // 跳过 BOM 字节，使用检测到的编码解码
-        let (decoded, _, had_errors) = encoding.decode(&bytes[bom_length..]);
-        if !had_errors {
-            return Ok(decoded.into_owned());
-        }
-    }
-
-    // 策略 3：尝试使用 GBK 编码（覆盖 GB2312，中文 Windows 常见编码）
-    let gbk = encoding_rs::Encoding::for_label(b"gbk").unwrap();
-    let (decoded, _, had_errors) = gbk.decode(&bytes);
-    if !had_errors {
-        return Ok(decoded.into_owned());
-    }
-
-    // 策略 4：尝试使用 GB18030 编码（GBK 的超集，支持更多字符）
-    let gb18030 = encoding_rs::Encoding::for_label(b"gb18030").unwrap();
-    let (decoded, _, had_errors) = gb18030.decode(&bytes);
-    if !had_errors {
-        return Ok(decoded.into_owned());
-    }
-
-    // 所有编码尝试均失败，返回错误信息
-    Err("读取文件失败: 文件编码无法识别，尝试了 UTF-8、GBK、GB18030 均失败".to_string())
+    crate::services::file_service::read_file_content(&path)
 }
 
 /// 写入内容到文件
@@ -85,7 +53,7 @@ pub fn read_file(path: String) -> Result<String, String> {
 /// `Result<(), String>` - 成功时返回 Ok(())，失败时返回错误描述
 #[tauri::command]
 pub fn write_file(path: String, content: String) -> Result<(), String> {
-    std::fs::write(&path, &content).map_err(|e| format!("写入文件失败: {}", e))
+    crate::services::file_service::write_file_content(&path, &content)
 }
 
 /// 提取 Markdown 文本的大纲（标题层级结构）
@@ -148,7 +116,7 @@ pub fn get_setting(key: String) -> Result<Option<String>, String> {
 /// 成功返回 Ok(())，失败返回错误描述字符串
 #[tauri::command]
 pub fn add_recent_file(path: String) -> Result<(), String> {
-    crate::database::add_recent_file(&path)
+    crate::services::file_service::add_recent_file_record(&path)
 }
 
 /// 获取最近打开文件列表
@@ -160,7 +128,7 @@ pub fn add_recent_file(path: String) -> Result<(), String> {
 /// 最近打开的文件路径列表（字符串向量）
 #[tauri::command]
 pub fn get_recent_files() -> Result<Vec<String>, String> {
-    crate::database::get_recent_files()
+    crate::services::file_service::get_recent_file_list()
 }
 
 // ==================== 多人协作命令 ====================
@@ -322,20 +290,28 @@ pub fn get_collab_status() -> Result<String, String> {
                 "local_peer_id": s.local_peer_id,
                 "local_username": s.local_username,
                 "document": s.document,
+                "disconnect_reason": null,
             });
             Ok(status.to_string())
         }
-        None => Ok(serde_json::json!({
-            "connected": false,
-            "room_id": "",
-            "is_host": false,
-            "peer_count": 0,
-            "peers": [],
-            "local_peer_id": "",
-            "local_username": "",
-            "document": "",
-        })
-        .to_string()),
+        None => {
+            // 当会话不存在时，检查是否有断开原因记录（如主机关闭房间）
+            let disconnect_reason = crate::collaboration::session::get_disconnect_reason();
+            // 读取后立即清除，避免重复提示
+            crate::collaboration::session::clear_disconnect_reason();
+            Ok(serde_json::json!({
+                "connected": false,
+                "room_id": "",
+                "is_host": false,
+                "peer_count": 0,
+                "peers": [],
+                "local_peer_id": "",
+                "local_username": "",
+                "document": "",
+                "disconnect_reason": disconnect_reason,
+            })
+            .to_string())
+        }
     }
 }
 
@@ -349,6 +325,7 @@ pub fn get_collab_status() -> Result<String, String> {
 ///
 /// # 返回
 /// 成功返回 Ok(())，失败返回错误描述字符串
+#[allow(dead_code)]
 #[tauri::command]
 pub fn set_collab_username(username: String) -> Result<(), String> {
     crate::collaboration::session::set_username(&username)
@@ -507,8 +484,7 @@ pub fn save_image_cache(
     };
 
     // 确保缓存目录存在
-    std::fs::create_dir_all(&cache_path)
-        .map_err(|e| format!("创建图片缓存目录失败: {}", e))?;
+    std::fs::create_dir_all(&cache_path).map_err(|e| format!("创建图片缓存目录失败: {}", e))?;
 
     // 保存图片文件
     let file_path = cache_path.join(&file_name);
@@ -541,4 +517,128 @@ fn get_default_cache_dir() -> std::path::PathBuf {
     };
 
     project_root.join("data").join("image_cache")
+}
+
+// ==================== OT 操作命令 ====================
+
+/// 计算 OT 操作（将编辑前后的文本差异转换为 OT 操作列表）
+///
+/// 此命令接收编辑前后的文本，通过后端的 OT 服务计算差异，
+/// 返回一组 Insert/Delete 操作列表。
+/// 前端在用户编辑文本时调用此命令获取 OT 操作，而非在前端自行计算。
+///
+/// # 参数
+/// - `old_text`: 编辑前的文本内容
+/// - `new_text`: 编辑后的文本内容
+///
+/// # 返回
+/// OT 操作列表的 JSON 字符串
+#[tauri::command]
+pub fn compute_operation_cmd(old_text: String, new_text: String) -> Result<String, String> {
+    let ops = crate::services::ot_service::compute_operation(&old_text, &new_text);
+    serde_json::to_string(&ops).map_err(|e| format!("操作序列化失败: {}", e))
+}
+
+/// 将 OT 操作应用到文本上
+///
+/// 接收文本和 OT 操作的 JSON 字符串，在后端应用操作并返回结果文本。
+/// 前端在需要合并远程操作或本地操作时调用此命令。
+///
+/// # 参数
+/// - `text`: 当前文本内容
+/// - `op_json`: OT 操作的 JSON 字符串
+///
+/// # 返回
+/// 应用操作后的文本内容
+#[tauri::command]
+pub fn apply_operation_cmd(text: String, op_json: String) -> Result<String, String> {
+    let op: crate::services::ot_service::Operation =
+        serde_json::from_str(&op_json).map_err(|e| format!("操作反序列化失败: {}", e))?;
+    Ok(crate::services::ot_service::apply_operation(&text, &op))
+}
+
+// ==================== 图片粘贴命令 ====================
+
+/// 处理粘贴图片：保存图片并生成插入图片后的文档内容
+///
+/// 接收 Base64 编码的图片数据，保存到缓存目录，
+/// 在指定光标位置插入 Markdown 图片语法，返回更新后的文档内容。
+/// 协作模式下还会生成对应的 OT Insert 操作。
+///
+/// # 参数
+/// - `base64_data`: 图片的 Base64 编码数据
+/// - `file_name`: 文件名（含扩展名）
+/// - `content`: 当前文档内容
+/// - `cursor_pos`: 光标位置（字符偏移量）
+/// - `cache_dir`: 图片缓存目录（可选，为空时使用默认目录）
+/// - `collab_enabled`: 是否启用协作模式
+///
+/// # 返回
+/// 包含新文档内容、文件路径和 OT 操作（协作模式）的 JSON 字符串
+#[tauri::command]
+pub fn paste_image_cmd(
+    base64_data: String,
+    file_name: String,
+    content: String,
+    cursor_pos: usize,
+    cache_dir: Option<String>,
+    collab_enabled: bool,
+) -> Result<String, String> {
+    let cache = cache_dir.unwrap_or_default();
+    let result = crate::services::image_service::process_paste_image(
+        &base64_data,
+        &file_name,
+        &content,
+        cursor_pos,
+        &cache,
+        collab_enabled,
+    )?;
+    serde_json::to_string(&result).map_err(|e| format!("结果序列化失败: {}", e))
+}
+
+// ==================== 文档状态命令 ====================
+
+/// 检查文档是否已被修改（脏状态）
+///
+/// 比较当前文档内容与上次保存/打开时的内容。
+///
+/// # 参数
+/// - `current`: 当前文档内容
+/// - `saved`: 上次保存/打开时的文档内容
+///
+/// # 返回
+/// 文档是否已被修改（true 表示有未保存的更改）
+#[tauri::command]
+pub fn check_dirty_cmd(current: String, saved: String) -> bool {
+    crate::services::document_service::check_dirty(&current, &saved)
+}
+
+/// 计算指定行的字符位置偏移量
+///
+/// 用于大纲导航：当用户点击大纲条目时，计算编辑器需要跳转到的字符位置。
+///
+/// # 参数
+/// - `content`: 文档内容
+/// - `line_number`: 目标行号（从 1 开始计数）
+///
+/// # 返回
+/// 该行起始字符的偏移量
+#[tauri::command]
+pub fn compute_line_position_cmd(content: String, line_number: usize) -> usize {
+    crate::services::document_service::compute_line_position(&content, line_number)
+}
+
+// ==================== 设置命令 ====================
+
+/// 加载所有设置项（合并数据库值与默认值）
+///
+/// 从数据库加载已有的设置项，对于缺失的项使用默认值填充。
+/// 返回包含所有设置项及其值的 JSON 字符串。
+///
+/// # 返回
+/// 设置项键值对的 JSON 字符串
+#[tauri::command]
+pub fn load_all_settings_cmd() -> Result<String, String> {
+    let settings = crate::services::settings_service::load_all_settings()?;
+    serde_json::to_string(&settings).map_err(|e| format!("设置序列化失败: {}", e))
 }

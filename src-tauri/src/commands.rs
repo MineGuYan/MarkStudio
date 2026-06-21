@@ -466,3 +466,78 @@ pub fn save_temp_image(data_base64: String, file_name: String) -> Result<String,
 
     Ok(file_path.to_string_lossy().to_string())
 }
+
+/// 将图片数据保存到图片缓存目录（非协作模式下使用）
+///
+/// 用户粘贴图片时，将图片保存到用户指定的缓存目录中。
+/// 默认目录为 `data/image_cache/`，用户可在设置中更改。
+/// 返回相对于项目根目录的相对路径，用于 Markdown 图片引用。
+///
+/// # 参数
+/// - `data_base64`: 图片的 Base64 编码数据（不含 data URI 前缀）
+/// - `file_name`: 保存的文件名（不含路径）
+/// - `cache_dir`: 用户指定的缓存目录路径（可选，为空时使用默认路径）
+///
+/// # 返回
+/// - `Ok(String)`: 保存后的文件路径（相对路径，可直接用于 Markdown 图片语法）
+/// - `Err(String)`: 保存失败，返回错误描述
+#[tauri::command]
+pub fn save_image_cache(
+    data_base64: String,
+    file_name: String,
+    cache_dir: Option<String>,
+) -> Result<String, String> {
+    use base64::Engine;
+
+    // 解码 Base64 数据为二进制
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&data_base64)
+        .map_err(|e| format!("Base64 解码失败: {}", e))?;
+
+    // 确定缓存目录：优先使用用户指定的目录，否则使用默认的 data/image_cache/
+    let cache_path = if let Some(dir) = cache_dir {
+        if dir.trim().is_empty() {
+            get_default_cache_dir()
+        } else {
+            std::path::PathBuf::from(&dir)
+        }
+    } else {
+        get_default_cache_dir()
+    };
+
+    // 确保缓存目录存在
+    std::fs::create_dir_all(&cache_path)
+        .map_err(|e| format!("创建图片缓存目录失败: {}", e))?;
+
+    // 保存图片文件
+    let file_path = cache_path.join(&file_name);
+    std::fs::write(&file_path, &data).map_err(|e| format!("保存图片文件失败: {}", e))?;
+
+    // 返回相对路径，便于在 Markdown 中使用
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+/// 获取默认的图片缓存目录路径
+///
+/// 默认路径为项目根目录下的 `data/image_cache/`。
+/// 此函数会确保返回的路径是绝对路径。
+fn get_default_cache_dir() -> std::path::PathBuf {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    // 开发模式下（cargo run），当前工作目录为 src-tauri/
+    // 需要回退到项目根目录
+    let project_root = if current_dir
+        .file_name()
+        .map(|n| n == "src-tauri")
+        .unwrap_or(false)
+    {
+        current_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| current_dir.clone())
+    } else {
+        current_dir
+    };
+
+    project_root.join("data").join("image_cache")
+}

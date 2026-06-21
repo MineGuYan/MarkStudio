@@ -38,6 +38,7 @@ pub fn run() {
             commands::send_collab_image,
             commands::get_collab_cache_dir,
             commands::save_temp_image,
+            commands::save_image_cache,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

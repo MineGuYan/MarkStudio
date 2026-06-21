@@ -15,7 +15,7 @@
 
 import { ref, watch, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { open, save, confirm } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // 导入子组件
@@ -25,6 +25,8 @@ import Preview from "./components/Preview.vue";
 import SplitPane from "./components/SplitPane.vue";
 import Outline from "./components/Outline.vue";
 import CollaborationPanel from "./components/CollaborationPanel.vue";
+import SettingsPanel from "./components/SettingsPanel.vue";
+import CloseConfirmDialog from "./components/CloseConfirmDialog.vue";
 
 // 导入组合式函数
 import { useTheme } from "./composables/useTheme";
@@ -86,6 +88,11 @@ let lastSavedContent: string = "";
 /** 窗口关闭事件监听器的取消函数 */
 let unlistenCloseRequested: (() => void) | null = null;
 
+/** 关闭确认对话框组件引用 */
+const closeConfirmRef = ref<InstanceType<typeof CloseConfirmDialog> | null>(
+  null
+);
+
 /** Markdown 解析后的 HTML 字符串，用于预览渲染 */
 const parsedHtml = ref<string>("");
 
@@ -123,9 +130,84 @@ let collabPollTimer: ReturnType<typeof setInterval> | null = null;
 /** 上一次轮询获取的文档内容，用于对比变更 */
 let lastPollDocument: string = "";
 
-// ==================== 防抖 IPC 调用 ====================
+// ==================== 设置面板状态 ====================
 
-/** Markdown 解析防抖定时器 ID */
+/** 设置面板是否可见 */
+const settingsPanelVisible = ref<boolean>(false);
+
+/** 图片缓存目录路径（可在设置中更改） */
+const imageCacheDir = ref<string>("");
+
+/** 默认的图片缓存目录 */
+const DEFAULT_IMAGE_CACHE_DIR = "data/image_cache/";
+
+/**
+ * 设置分类与设置项配置
+ *
+ * 要新增设置分类，只需在此数组中添加新的分类对象即可。
+ * 每个分类包含 id、label 和一组 settings。
+ * 每个 setting 包含 key、label、description、type、value 和 defaultValue。
+ */
+const settingsCategories = ref([
+  {
+    id: "general",
+    label: "通用",
+    settings: [
+      {
+        key: "image_cache_dir",
+        label: "图片缓存目录",
+        description:
+          "粘贴图片时，图片文件将保存到此目录。默认为项目根目录下的 data/image_cache/。",
+        type: "path" as const,
+        value: imageCacheDir.value,
+        defaultValue: DEFAULT_IMAGE_CACHE_DIR,
+      },
+    ],
+  },
+  {
+    id: "editor",
+    label: "编辑器",
+    settings: [
+      // 未来可在此添加编辑器相关设置，例如：
+      // { key: "font_size", label: "字体大小", description: "...", type: "select", ... }
+    ],
+  },
+]);
+
+// ==================== 设置面板事件处理 ====================
+
+/**
+ * 处理设置面板"设置项变更"事件
+ * 将设置值持久化到 SQLite 数据库，并同步更新本地状态
+ *
+ * @param key - 设置项标识键
+ * @param value - 新的设置值
+ */
+async function onSettingUpdate(key: string, value: string): Promise<void> {
+  try {
+    // 持久化到 SQLite 数据库
+    await invoke("save_setting", { key, value });
+
+    // 同步更新本地状态
+    if (key === "image_cache_dir") {
+      imageCacheDir.value = value;
+    }
+
+    // 同步更新 settingsCategories 中对应设置项的 value
+    // 确保设置面板中显示的值与本地状态一致
+    for (const category of settingsCategories.value) {
+      const setting = category.settings.find((s) => s.key === key);
+      if (setting) {
+        setting.value = value;
+        break;
+      }
+    }
+  } catch (e) {
+    console.error("保存设置失败:", e);
+  }
+}
+
+// ==================== 防抖 IPC 调用 ====================
 let parseDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** 大纲提取防抖定时器 ID */
@@ -504,6 +586,33 @@ onMounted(async () => {
     console.error("加载主题设置失败:", e);
   }
 
+  // 从 SQLite 数据库加载图片缓存目录设置
+  try {
+    const savedCacheDir = await invoke<string | null>("get_setting", {
+      key: "image_cache_dir",
+    });
+    if (savedCacheDir && savedCacheDir.trim()) {
+      imageCacheDir.value = savedCacheDir;
+    } else {
+      imageCacheDir.value = DEFAULT_IMAGE_CACHE_DIR;
+    }
+    // 同步更新 settingsCategories 中对应设置项的 value
+    const generalCategory = settingsCategories.value.find(
+      (c) => c.id === "general"
+    );
+    if (generalCategory) {
+      const cacheSetting = generalCategory.settings.find(
+        (s) => s.key === "image_cache_dir"
+      );
+      if (cacheSetting) {
+        cacheSetting.value = imageCacheDir.value;
+      }
+    }
+  } catch (e) {
+    console.error("加载图片缓存目录设置失败:", e);
+    imageCacheDir.value = DEFAULT_IMAGE_CACHE_DIR;
+  }
+
   // 注册窗口关闭事件拦截器：当文档未保存时弹出确认弹窗
   unlistenCloseRequested = await getCurrentWindow().onCloseRequested(
     async (event) => {
@@ -515,18 +624,10 @@ onMounted(async () => {
       // 阻止窗口立即关闭
       event.preventDefault();
 
-      // 弹出确认对话框，询问用户是否保存
-      const userChoice = await confirm(
-        "当前文档尚未保存，是否保存后再关闭？",
-        {
-          title: "MarkStudio",
-          kind: "warning",
-          cancelLabel: "取消",
-          okLabel: "保存并关闭",
-        }
-      );
+      // 弹出自定义确认对话框，提供三个选项：保存并关闭、不保存、取消
+      const choice = await closeConfirmRef.value!.show();
 
-      if (userChoice) {
+      if (choice === "save") {
         // 用户选择"保存并关闭"：先保存文件
         try {
           await saveFile();
@@ -546,8 +647,16 @@ onMounted(async () => {
         // 因此不会重入本回调，也无需 setTimeout 延迟。
         // 注意：需要 capabilities 中配置 core:window:allow-destroy 权限。
         await getCurrentWindow().destroy();
+      } else if (choice === "discard") {
+        // 用户选择"不保存"：放弃更改，直接关闭窗口
+        if (unlistenCloseRequested !== null) {
+          unlistenCloseRequested();
+          unlistenCloseRequested = null;
+        }
+
+        await getCurrentWindow().destroy();
       }
-      // 用户点击"取消"或关闭对话框：不关闭窗口，让用户继续编辑
+      // choice === "cancel"：用户点击"取消"或关闭对话框，不关闭窗口
     }
   );
 });
@@ -597,7 +706,7 @@ function onOutlineNavigate(line: number): void {
 <template>
   <!-- 应用根容器，使用主题 CSS 变量控制背景色 -->
   <div class="app-container">
-    <!-- 顶部工具栏：模式切换 & 主题切换 & 文件操作 & 协作 -->
+    <!-- 顶部工具栏：模式切换 & 主题切换 & 文件操作 & 协作 & 设置 -->
     <Toolbar
       :mode="mode"
       :theme="theme"
@@ -607,6 +716,7 @@ function onOutlineNavigate(line: number): void {
       @open-file="openFile"
       @save-file="saveFile"
       @toggle-collab="collabPanelVisible = !collabPanelVisible"
+      @toggle-settings="settingsPanelVisible = !settingsPanelVisible"
     />
 
     <!-- 下方主体区域：横向 flex 布局 -->
@@ -649,6 +759,7 @@ function onOutlineNavigate(line: number): void {
           :collab-enabled="collabConnected"
           :collab-peers="collabPeers"
           :local-peer-id="localPeerId"
+          :image-cache-dir="imageCacheDir"
           @collab-operation="onEditorOperation"
           @collab-cursor="onEditorCursor"
         />
@@ -669,6 +780,7 @@ function onOutlineNavigate(line: number): void {
               :collab-enabled="collabConnected"
               :collab-peers="collabPeers"
               :local-peer-id="localPeerId"
+              :image-cache-dir="imageCacheDir"
               @collab-operation="onEditorOperation"
               @collab-cursor="onEditorCursor"
             />
@@ -687,6 +799,36 @@ function onOutlineNavigate(line: number): void {
         @document-update="onCollabDocumentUpdate"
       />
     </div>
+
+    <!-- 设置面板覆盖层（覆盖主内容区域） -->
+    <div v-if="settingsPanelVisible" class="settings-overlay">
+      <div class="settings-overlay__header">
+        <button
+          class="settings-overlay__close"
+          @click="settingsPanelVisible = false"
+          title="关闭设置"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            width="20"
+            height="20"
+          >
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+      <SettingsPanel
+        :categories="settingsCategories"
+        @update-setting="onSettingUpdate"
+      />
+    </div>
+
+    <!-- 关闭确认对话框（由 onCloseRequested 触发） -->
+    <CloseConfirmDialog ref="closeConfirmRef" />
   </div>
 </template>
 
@@ -811,5 +953,48 @@ body,
   flex: 1;
   display: flex;
   overflow: hidden;
+}
+
+/* ==================== 设置面板覆盖层 ==================== */
+
+/* 设置面板覆盖层：使用绝对定位覆盖主内容区域 */
+.settings-overlay {
+  position: absolute;
+  top: 48px; /* 工具栏高度 */
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-color);
+}
+
+/* 设置面板顶部关闭按钮区域 */
+.settings-overlay__header {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 16px;
+  background-color: var(--toolbar-bg-color);
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* 关闭按钮 */
+.settings-overlay__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-color);
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.settings-overlay__close:hover {
+  background-color: var(--button-hover-bg);
 }
 </style>

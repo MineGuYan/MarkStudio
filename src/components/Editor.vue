@@ -56,12 +56,15 @@ const props = withDefaults(
     collabPeers?: PeerInfo[];
     /** 本地对等方 ID，用于过滤掉自己的光标 */
     localPeerId?: string;
+    /** 图片缓存目录路径（非协作模式下粘贴图片时使用的保存目录） */
+    imageCacheDir?: string;
   }>(),
   {
     placeholder: "请输入 Markdown 内容...",
     collabEnabled: false,
     collabPeers: () => [],
     localPeerId: "",
+    imageCacheDir: "",
   }
 );
 
@@ -371,19 +374,19 @@ function handleCursorChange(): void {
 }
 
 /**
- * 处理粘贴事件，拦截剪贴板中的图片进行协作同步
+ * 处理粘贴事件，拦截剪贴板中的图片进行保存并插入 Markdown 图片语法
  *
- * 在协作模式下，如果用户粘贴的内容包含图片，
- * 则将图片保存到本地临时目录，通过协作会话发送给对等方，
- * 并在 Markdown 中插入 `![image](local_path)` 语法。
- * 非图片的文本粘贴行为保持不变。
+ * 协作模式下：
+ * - 将图片保存到临时目录，通过协作会话发送给对等方
+ * - 在 Markdown 中插入 `![image](local_path)` 语法
+ *
+ * 非协作模式下：
+ * - 将图片保存到用户配置的缓存目录（默认 data/image_cache/）
+ * - 在 Markdown 中插入 `![image](relative_path)` 语法
  *
  * @param event - ClipboardEvent 粘贴事件对象
  */
 async function handlePaste(event: ClipboardEvent): Promise<void> {
-  // 仅在协作模式下处理图片粘贴
-  if (!props.collabEnabled) return;
-
   const clipboardData = event.clipboardData;
   if (!clipboardData) return;
 
@@ -413,16 +416,27 @@ async function handlePaste(event: ClipboardEvent): Promise<void> {
         const ext = item.type.split("/")[1] || "png";
         const fileName = `paste_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`;
 
-        // 调用后端命令将图片保存到临时文件
-        const filePath = await invoke<string>("save_temp_image", {
-          dataBase64: base64Content,
-          fileName,
-        });
+        let filePath: string;
 
-        // 调用后端命令将图片发送给协作对等方
-        await invoke("send_collab_image", {
-          filePath,
-        });
+        if (props.collabEnabled) {
+          // 协作模式：保存到临时目录，并通过协作会话发送给对等方
+          filePath = await invoke<string>("save_temp_image", {
+            dataBase64: base64Content,
+            fileName,
+          });
+
+          // 调用后端命令将图片发送给协作对等方
+          await invoke("send_collab_image", {
+            filePath,
+          });
+        } else {
+          // 非协作模式：保存到用户配置的缓存目录
+          filePath = await invoke<string>("save_image_cache", {
+            dataBase64: base64Content,
+            fileName,
+            cacheDir: props.imageCacheDir || null,
+          });
+        }
 
         // 在光标位置插入 Markdown 图片语法
         const textarea = textareaRef.value;
@@ -451,7 +465,7 @@ async function handlePaste(event: ClipboardEvent): Promise<void> {
           }, 0);
         }
       } catch (err) {
-        console.error("协作图片粘贴失败:", err);
+        console.error("图片粘贴失败:", err);
       }
 
       // 只处理第一张图片

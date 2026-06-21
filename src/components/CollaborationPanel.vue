@@ -98,6 +98,9 @@ const errorMessage = ref("");
 /** 成功消息 */
 const successMessage = ref("");
 
+/** 标记用户是否正在主动离开房间，用于抑制"主机关闭房间"的误报提示 */
+const isLeavingVoluntarily = ref(false);
+
 /** 复制反馈文本（为空时不显示） */
 const copiedLabel = ref("");
 
@@ -280,6 +283,12 @@ async function handleJoinRoom(): Promise<void> {
  * 调用后端 IPC 命令离开房间，清理状态
  */
 async function handleLeaveRoom(): Promise<void> {
+  // 先标记用户正在主动离开，避免轮询检测到"断开"后误报"主机关闭房间"
+  isLeavingVoluntarily.value = true;
+
+  // 先停止轮询，避免在 await 期间轮询触发误判
+  stopStatusPolling();
+
   try {
     await invoke("leave_collab_room");
   } catch (error) {
@@ -294,12 +303,12 @@ async function handleLeaveRoom(): Promise<void> {
   localUsername.value = "";
   localPeerId.value = "";
 
-  // 停止轮询
-  stopStatusPolling();
-
   // 通知父组件断开连接
   emit("connection-change", false);
   emit("peers-update", []);
+
+  // 重置主动离开标记
+  isLeavingVoluntarily.value = false;
 }
 
 /**
@@ -316,7 +325,8 @@ function startStatusPolling(): void {
       const status: CollabStatus = JSON.parse(statusJson);
 
       // 检测连接是否已断开（如主机关闭了房间）
-      if (!status.connected) {
+      // 如果用户正在主动离开，跳过此检测，避免误报"主机关闭房间"
+      if (!status.connected && !isLeavingVoluntarily.value) {
         console.warn("[协作] 检测到房间已断开，自动退出");
         errorMessage.value = "主机已关闭房间，您已被强制退出";
         // 8 秒后自动清除提示信息

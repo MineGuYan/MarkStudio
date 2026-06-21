@@ -1183,18 +1183,49 @@ async fn handle_connection(
                         peer_id: sender_peer_id,
                         username,
                     } => {
-                        // 广播离开通知给其他客户端
-                        let forward_msg = CollaborationMessage::LeaveNotification {
+                        // 从客户端发送通道列表中移除该对等方
+                        {
+                            let mut clients = client_txs.lock().unwrap();
+                            if let Some(pos) = clients.iter().position(|(pid, _)| *pid == sender_peer_id) {
+                                clients.remove(pos);
+                            }
+                        }
+
+                        // 从主机 session.peers 中移除该对等方
+                        {
+                            let mut session_guard = CURRENT_SESSION.lock().unwrap();
+                            if let Some(ref mut session) = *session_guard {
+                                session.peers.retain(|p| p.peer_id != sender_peer_id);
+                            }
+                        }
+
+                        // 构造更新后的对等方列表
+                        let updated_peers = {
+                            let session_guard = CURRENT_SESSION.lock().unwrap();
+                            session_guard
+                                .as_ref()
+                                .map(|s| s.peers.clone())
+                                .unwrap_or_default()
+                        };
+
+                        // 构造离开通知消息，广播给剩余客户端
+                        let leave_msg = CollaborationMessage::LeaveNotification {
                             peer_id: sender_peer_id.clone(),
                             username,
                         };
-                        let forward_json = serialize_message(&forward_msg).unwrap_or_default();
+                        let leave_json = serialize_message(&leave_msg).unwrap_or_default();
 
+                        // 构造对等方列表更新消息
+                        let peer_list_msg = CollaborationMessage::PeerListUpdate {
+                            peers: updated_peers,
+                        };
+                        let peer_list_json = serialize_message(&peer_list_msg).unwrap_or_default();
+
+                        // 广播给所有剩余客户端
                         let clients = client_txs.lock().unwrap();
-                        for (pid, tx) in clients.iter() {
-                            if *pid != sender_peer_id {
-                                let _ = tx.send(forward_json.clone());
-                            }
+                        for (_, tx) in clients.iter() {
+                            let _ = tx.send(leave_json.clone());
+                            let _ = tx.send(peer_list_json.clone());
                         }
                     }
 

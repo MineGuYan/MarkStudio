@@ -439,11 +439,14 @@ async function handlePaste(event: ClipboardEvent): Promise<void> {
         }
 
         // 在光标位置插入 Markdown 图片语法
+        // 注意：必须将路径中的反斜杠替换为正斜杠，因为 Markdown 中 \ 是转义字符，
+        // 如果不替换，pulldown-cmark 会将 \图、\T 等转义处理，导致路径错误
         const textarea = textareaRef.value;
         if (textarea) {
           const cursorPos = textarea.selectionStart;
           const currentText = textareaValue.value ?? "";
-          const imageMarkdown = `![image](${filePath})`;
+          const normalizedPath = filePath.replace(/\\/g, "/");
+          const imageMarkdown = `![image](${normalizedPath})`;
 
           // 在光标位置插入图片引用
           const newText =

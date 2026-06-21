@@ -59,6 +59,9 @@ pub fn parse_markdown_to_html(markdown: &str) -> String {
 /// - 如果 src 以 `data:` 开头 → 跳过（已经是 Data URI）
 /// - 否则视为本地文件路径 → 读取文件并转换为 Base64 Data URI
 ///
+/// 注意：pulldown-cmark 会将路径中的非 ASCII 字符（如中文）进行 URL 编码
+/// （例如 `图片` → `%E5%9B%BE%E7%89%87`），因此在读取文件前需要先进行 URL 解码。
+///
 /// 如果文件读取失败（文件不存在、权限不足等），保留原始路径不变。
 ///
 /// # 参数
@@ -82,8 +85,12 @@ fn convert_local_images_to_base64(html: &mut String) {
             continue;
         }
 
+        // pulldown-cmark 会将路径中的非 ASCII 字符进行 URL 编码，
+        // 需要先解码为原始文件路径才能正确读取文件
+        let decoded_path = percent_decode(src_value);
+
         // 尝试读取本地图片文件
-        let path = std::path::Path::new(src_value);
+        let path = std::path::Path::new(&decoded_path);
         match std::fs::read(path) {
             Ok(data) => {
                 // 根据文件扩展名确定 MIME 类型
@@ -102,10 +109,55 @@ fn convert_local_images_to_base64(html: &mut String) {
         }
     }
 
-    // 执行替换（从后往前替换，避免字符串偏移问题）
+    // 执行替换
     for (original, replacement) in replacements {
         *html = html.replace(&original, &replacement);
     }
+}
+
+/// 对 URL 编码（百分号编码）的字符串进行解码
+///
+/// 例如 `%E5%9B%BE%E7%89%87` → `图片`。
+/// pulldown-cmark 在解析 Markdown 图片链接时，会将非 ASCII 字符
+/// 进行 URL 编码，因此在读取本地文件前需要先解码。
+///
+/// 解码失败时返回原始字符串。
+///
+/// # 参数
+/// - `input`: 可能包含百分号编码的字符串
+///
+/// # 返回
+/// 解码后的字符串
+fn percent_decode(input: &str) -> String {
+    // 如果字符串中不包含 %，无需解码，直接返回
+    if !input.contains('%') {
+        return input.to_string();
+    }
+
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut chars = input.chars();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            // 读取 % 后的两个十六进制字符
+            let h1 = chars.next().and_then(|ch| ch.to_digit(16));
+            let h2 = chars.next().and_then(|ch| ch.to_digit(16));
+            if let (Some(hi), Some(lo)) = (h1, h2) {
+                bytes.push(((hi << 4) | lo) as u8);
+            } else {
+                // 解码失败，保留原始 % 字符（实际场景中 pulldown-cmark 生成的编码总是有效的）
+                bytes.push(b'%');
+            }
+        } else {
+            // 非 % 字符直接保留（ASCII 范围内）
+            let mut buf = [0u8; 4];
+            let encoded = c.encode_utf8(&mut buf);
+            bytes.extend_from_slice(encoded.as_bytes());
+        }
+    }
+
+    // 将字节序列解码为 UTF-8 字符串
+    String::from_utf8(bytes).unwrap_or_else(|_| input.to_string())
 }
 
 /// 根据文件扩展名推断 MIME 类型

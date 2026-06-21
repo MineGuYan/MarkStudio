@@ -794,6 +794,7 @@ function onOutlineNavigate(line: number): void {
       <!-- 右侧：协作面板（侧边栏形式） -->
       <CollaborationPanel
         v-show="collabPanelVisible"
+        :current-document="content"
         @connection-change="onCollabConnectionChange"
         @peers-update="onCollabPeersUpdate"
         @document-update="onCollabDocumentUpdate"

@@ -59,6 +59,13 @@ export interface CollabStatus {
   document: string;
 }
 
+// ==================== Props 定义 ====================
+
+/** 当前编辑器中的文档内容，创建房间时作为初始文档同步给加入者 */
+const props = defineProps<{
+  currentDocument?: string;
+}>();
+
 // ==================== Emits 定义 ====================
 
 const emit = defineEmits<{
@@ -183,12 +190,12 @@ async function handleCreateRoom(): Promise<void> {
   createDialogError.value = "";
 
   try {
-    // 调用后端 IPC 创建房间
+    // 调用后端 IPC 创建房间，基于当前编辑器内容作为协作的初始文档
     const result = await invoke<RoomInfo>("create_collab_room", {
       port: createForm.port,
       password: createForm.password,
       username: createForm.username.trim(),
-      document: "", // 初始文档为空
+      document: props.currentDocument ?? "",
     });
 
     // 更新房间信息

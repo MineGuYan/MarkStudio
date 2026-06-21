@@ -1999,6 +1999,7 @@ dependencies = [
  "encoding_rs",
  "futures-util",
  "pulldown-cmark",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

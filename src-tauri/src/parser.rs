@@ -2,16 +2,31 @@
 //!
 //! 本模块负责将 Markdown 文本转换为 HTML 字符串。
 //! 使用 pulldown-cmark 库进行解析，支持表格、任务列表、删除线等扩展语法。
+//! 解析完成后，自动将本地文件路径的图片转换为 Base64 Data URI，
+//! 确保在 WebView 中能够正常显示本地图片。
 
 use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
+use regex::Regex;
+use std::sync::LazyLock;
+
+/// 用于匹配 HTML 中 `<img>` 标签 src 属性的正则表达式
+///
+/// 捕获组 1：src 属性值（可能带引号）
+/// 捕获组 2：图片文件路径
+static IMG_SRC_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<img\s[^>]*?src="([^"]+)""#).expect("图片 src 正则表达式编译失败")
+});
 
 /// 将 Markdown 文本解析为 HTML 字符串
+///
+/// 解析完成后，自动检测 HTML 中的本地图片路径（非 http/https 开头），
+/// 将其转换为 Base64 Data URI，确保在 WebView 中能够正常显示。
 ///
 /// # 参数
 /// - `markdown`: 要解析的 Markdown 源文本
 ///
 /// # 返回
-/// 解析后生成的 HTML 字符串
+/// 解析后生成的 HTML 字符串（本地图片已替换为 Base64 Data URI）
 ///
 /// # 支持的扩展语法
 /// - 表格 (table)
@@ -31,7 +46,97 @@ pub fn parse_markdown_to_html(markdown: &str) -> String {
     // 将解析器产生的事件流推入 HTML 字符串中
     html::push_html(&mut html_output, parser);
 
+    // 后处理：将本地图片路径转换为 Base64 Data URI
+    convert_local_images_to_base64(&mut html_output);
+
     html_output
+}
+
+/// 后处理 HTML 字符串，将本地图片路径替换为 Base64 Data URI
+///
+/// 遍历 HTML 中的所有 `<img>` 标签，检测 src 属性值：
+/// - 如果 src 以 `http://` 或 `https://` 开头 → 跳过（网络图片）
+/// - 如果 src 以 `data:` 开头 → 跳过（已经是 Data URI）
+/// - 否则视为本地文件路径 → 读取文件并转换为 Base64 Data URI
+///
+/// 如果文件读取失败（文件不存在、权限不足等），保留原始路径不变。
+///
+/// # 参数
+/// - `html`: 要处理的 HTML 字符串（原地修改）
+fn convert_local_images_to_base64(html: &mut String) {
+    use base64::Engine;
+
+    // 收集所有需要替换的项（源路径 → 替换后的 Data URI）
+    let mut replacements: Vec<(String, String)> = Vec::new();
+
+    // 遍历所有匹配的 img 标签
+    for caps in IMG_SRC_REGEX.captures_iter(html) {
+        let full_match = caps.get(0).unwrap().as_str().to_string();
+        let src_value = caps.get(1).unwrap().as_str();
+
+        // 跳过网络图片和已经是 Data URI 的图片
+        if src_value.starts_with("http://")
+            || src_value.starts_with("https://")
+            || src_value.starts_with("data:")
+        {
+            continue;
+        }
+
+        // 尝试读取本地图片文件
+        let path = std::path::Path::new(src_value);
+        match std::fs::read(path) {
+            Ok(data) => {
+                // 根据文件扩展名确定 MIME 类型
+                let mime = get_mime_type(src_value);
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                let data_uri = format!("data:{};base64,{}", mime, b64);
+
+                // 构造替换后的 img 标签
+                let new_img = full_match.replace(src_value, &data_uri);
+                replacements.push((full_match, new_img));
+            }
+            Err(e) => {
+                eprintln!("[MarkStudio] 图片文件读取失败 ({}): {}", src_value, e);
+                // 读取失败时保留原始路径，不进行替换
+            }
+        }
+    }
+
+    // 执行替换（从后往前替换，避免字符串偏移问题）
+    for (original, replacement) in replacements {
+        *html = html.replace(&original, &replacement);
+    }
+}
+
+/// 根据文件扩展名推断 MIME 类型
+///
+/// 支持的图片格式：png, jpg/jpeg, gif, webp, svg, bmp, ico
+/// 无法识别时默认返回 `image/png`。
+///
+/// # 参数
+/// - `path`: 文件路径字符串
+///
+/// # 返回
+/// 对应的 MIME 类型字符串
+fn get_mime_type(path: &str) -> &'static str {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".svg") {
+        "image/svg+xml"
+    } else if lower.ends_with(".bmp") {
+        "image/bmp"
+    } else if lower.ends_with(".ico") {
+        "image/x-icon"
+    } else {
+        "image/png" // 默认 MIME 类型
+    }
 }
 
 /// 大纲条目结构体，表示文档中的一个标题

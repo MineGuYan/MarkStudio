@@ -24,7 +24,11 @@ pub fn parse_markdown(markdown: String) -> String {
 /// 读取文件内容
 ///
 /// 接收文件路径，读取文件内容并以字符串形式返回。
-/// 使用标准库的 std::fs::read_to_string 读取文件。
+/// 支持多种编码自动检测：
+/// 1. 首先尝试 UTF-8 编码读取
+/// 2. 若 UTF-8 失败，检测 BOM（字节顺序标记）识别编码
+/// 3. 若无 BOM，尝试使用 GBK 编码解码（中文 Windows 常见编码）
+/// 4. 若仍失败，尝试使用 GB18030 编码（GBK 的超集）
 ///
 /// # 参数
 /// - `path`: 文件路径字符串
@@ -33,7 +37,39 @@ pub fn parse_markdown(markdown: String) -> String {
 /// `Result<String, String>` - 成功时返回文件内容，失败时返回错误描述
 #[tauri::command]
 pub fn read_file(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path).map_err(|e| format!("读取文件失败: {}", e))
+    // 先以原始字节形式读取文件，避免编码问题导致读取失败
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取文件失败: {}", e))?;
+
+    // 策略 1：尝试按 UTF-8 解码
+    if let Ok(content) = String::from_utf8(bytes.clone()) {
+        return Ok(content);
+    }
+
+    // 策略 2：检测 BOM（字节顺序标记）来判断编码
+    if let Some((encoding, bom_length)) = encoding_rs::Encoding::for_bom(&bytes) {
+        // 跳过 BOM 字节，使用检测到的编码解码
+        let (decoded, _, had_errors) = encoding.decode(&bytes[bom_length..]);
+        if !had_errors {
+            return Ok(decoded.into_owned());
+        }
+    }
+
+    // 策略 3：尝试使用 GBK 编码（覆盖 GB2312，中文 Windows 常见编码）
+    let gbk = encoding_rs::Encoding::for_label(b"gbk").unwrap();
+    let (decoded, _, had_errors) = gbk.decode(&bytes);
+    if !had_errors {
+        return Ok(decoded.into_owned());
+    }
+
+    // 策略 4：尝试使用 GB18030 编码（GBK 的超集，支持更多字符）
+    let gb18030 = encoding_rs::Encoding::for_label(b"gb18030").unwrap();
+    let (decoded, _, had_errors) = gb18030.decode(&bytes);
+    if !had_errors {
+        return Ok(decoded.into_owned());
+    }
+
+    // 所有编码尝试均失败，返回错误信息
+    Err("读取文件失败: 文件编码无法识别，尝试了 UTF-8、GBK、GB18030 均失败".to_string())
 }
 
 /// 写入内容到文件

@@ -15,7 +15,8 @@
 
 import { ref, watch, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open, save, confirm } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // 导入子组件
 import Toolbar from "./components/Toolbar.vue";
@@ -75,6 +76,15 @@ const content = ref<string>("");
 
 /** 当前打开的文件路径，为空表示尚未保存过 */
 const currentFilePath = ref<string>("");
+
+/** 文档是否已被修改（未保存） */
+const isDirty = ref<boolean>(false);
+
+/** 最近一次保存/打开时的文档内容，用于对比是否被修改 */
+let lastSavedContent: string = "";
+
+/** 窗口关闭事件监听器的取消函数 */
+let unlistenCloseRequested: (() => void) | null = null;
 
 /** Markdown 解析后的 HTML 字符串，用于预览渲染 */
 const parsedHtml = ref<string>("");
@@ -205,6 +215,10 @@ async function openFile(): Promise<void> {
       // 调用后端 read_file 命令读取文件内容
       content.value = await invoke<string>("read_file", { path });
 
+      // 重置脏状态，标记为已保存
+      lastSavedContent = content.value;
+      isDirty.value = false;
+
       // 将文件路径记录到最近文件列表（SQLite 持久化）
       try {
         await invoke("add_recent_file", { path });
@@ -232,6 +246,9 @@ async function saveFile(): Promise<void> {
         path: currentFilePath.value,
         content: content.value,
       });
+      // 保存成功后重置脏状态
+      lastSavedContent = content.value;
+      isDirty.value = false;
     } else {
       // 尚无路径，弹出"另存为"对话框
       await saveFileAs();
@@ -263,6 +280,10 @@ async function saveFileAs(): Promise<void> {
         path: selected,
         content: content.value,
       });
+
+      // 保存成功后重置脏状态
+      lastSavedContent = content.value;
+      isDirty.value = false;
     }
   } catch (error) {
     console.error("另存为文件失败:", error);
@@ -436,6 +457,17 @@ watch(
   { immediate: true }
 );
 
+/**
+ * 监听 Markdown 内容变化，追踪文档是否被修改（脏状态）
+ * 与最近一次保存/打开时的内容对比，判断是否需要保存
+ */
+watch(
+  () => content.value,
+  (newContent) => {
+    isDirty.value = newContent !== lastSavedContent;
+  }
+);
+
 // ==================== Ctrl+F 查找快捷键 ====================
 
 /**
@@ -471,6 +503,53 @@ onMounted(async () => {
   } catch (e) {
     console.error("加载主题设置失败:", e);
   }
+
+  // 注册窗口关闭事件拦截器：当文档未保存时弹出确认弹窗
+  unlistenCloseRequested = await getCurrentWindow().onCloseRequested(
+    async (event) => {
+      // 如果文档没有被修改，直接允许关闭
+      if (!isDirty.value) {
+        return;
+      }
+
+      // 阻止窗口立即关闭
+      event.preventDefault();
+
+      // 弹出确认对话框，询问用户是否保存
+      const userChoice = await confirm(
+        "当前文档尚未保存，是否保存后再关闭？",
+        {
+          title: "MarkStudio",
+          kind: "warning",
+          cancelLabel: "取消",
+          okLabel: "保存并关闭",
+        }
+      );
+
+      if (userChoice) {
+        // 用户选择"保存并关闭"：先保存文件
+        try {
+          await saveFile();
+        } catch (e) {
+          console.error("关闭前自动保存失败:", e);
+          // 保存失败则不关闭，让用户手动处理
+          return;
+        }
+
+        // 保存成功后，取消关闭事件监听器，避免 onUnmounted 时重复清理
+        if (unlistenCloseRequested !== null) {
+          unlistenCloseRequested();
+          unlistenCloseRequested = null;
+        }
+
+        // 直接销毁窗口。destroy() 不经过 onCloseRequested 事件流程，
+        // 因此不会重入本回调，也无需 setTimeout 延迟。
+        // 注意：需要 capabilities 中配置 core:window:allow-destroy 权限。
+        await getCurrentWindow().destroy();
+      }
+      // 用户点击"取消"或关闭对话框：不关闭窗口，让用户继续编辑
+    }
+  );
 });
 
 // 在组件卸载时移除 Ctrl+F 键盘事件，防止内存泄漏
@@ -478,6 +557,11 @@ onUnmounted(() => {
   document.removeEventListener("keydown", handleCtrlF);
   // 清理协作轮询定时器
   stopCollabPolling();
+  // 取消窗口关闭事件监听
+  if (unlistenCloseRequested !== null) {
+    unlistenCloseRequested();
+    unlistenCloseRequested = null;
+  }
 });
 
 // ==================== 大纲导航处理 ====================

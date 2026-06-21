@@ -318,6 +318,11 @@ function startStatusPolling(): void {
       // 检测连接是否已断开（如主机关闭了房间）
       if (!status.connected) {
         console.warn("[协作] 检测到房间已断开，自动退出");
+        errorMessage.value = "主机已关闭房间，您已被强制退出";
+        // 8 秒后自动清除提示信息
+        setTimeout(() => {
+          errorMessage.value = "";
+        }, 8000);
         handleLeaveRoom();
         return;
       }
@@ -594,7 +599,7 @@ function getUserInitial(username: string): string {
 
     <!-- ==================== 创建房间对话框 ==================== -->
     <Teleport to="body">
-      <div v-if="showCreateDialog" class="modal-overlay" @click.self="showCreateDialog = false">
+      <div v-if="showCreateDialog" class="modal-overlay" @mousedown.self="showCreateDialog = false">
         <div class="modal">
           <div class="modal__header">
             <h3 class="modal__title">创建协作房间</h3>
@@ -668,7 +673,7 @@ function getUserInitial(username: string): string {
 
     <!-- ==================== 加入房间对话框 ==================== -->
     <Teleport to="body">
-      <div v-if="showJoinDialog" class="modal-overlay" @click.self="showJoinDialog = false">
+      <div v-if="showJoinDialog" class="modal-overlay" @mousedown.self="showJoinDialog = false">
         <div class="modal">
           <div class="modal__header">
             <h3 class="modal__title">加入协作房间</h3>

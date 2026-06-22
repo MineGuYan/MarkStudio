@@ -13,6 +13,7 @@
  * - 预留 open-file、remove-recent、add-favorite 事件的发射接口
  */
 
+import { ref } from "vue";
 import Outline from "./Outline.vue";
 import type { OutlineItem } from "./Outline.vue";
 import RecentFiles from "./RecentFiles.vue";
@@ -78,6 +79,35 @@ function switchTab(key: string): void {
 function onOutlineNavigate(line: number): void {
   emit("navigate", line);
 }
+
+// ==================== 组件引用 ====================
+
+/** 最近访问组件引用 */
+const recentFilesRef = ref<InstanceType<typeof RecentFiles> | null>(null);
+
+/** 收藏夹组件引用 */
+const favoritesRef = ref<InstanceType<typeof Favorites> | null>(null);
+
+// ==================== 暴露方法 ====================
+
+/**
+ * 刷新最近访问列表，供父组件在打开新文件后主动调用
+ */
+function refreshRecent(): void {
+  recentFilesRef.value?.refresh();
+}
+
+/**
+ * 刷新收藏夹目录树，供父组件在收藏文件后主动调用
+ */
+function refreshFavorites(): void {
+  favoritesRef.value?.refresh();
+}
+
+defineExpose({
+  refreshRecent,
+  refreshFavorites,
+});
 </script>
 
 <template>
@@ -107,6 +137,7 @@ function onOutlineNavigate(line: number): void {
       <!-- 最近访问标签页：渲染 RecentFiles 组件 -->
       <RecentFiles
         v-else-if="activeTab === 'recent'"
+        ref="recentFilesRef"
         @open-file="(path) => emit('open-file', path)"
         @add-favorite="(path) => emit('add-favorite', path)"
       />
@@ -114,6 +145,7 @@ function onOutlineNavigate(line: number): void {
       <!-- 收藏夹标签页：渲染 Favorites 组件 -->
       <Favorites
         v-else-if="activeTab === 'favorites'"
+        ref="favoritesRef"
         @open-file="(path) => emit('open-file', path)"
       />
     </div>

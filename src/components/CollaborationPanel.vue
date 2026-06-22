@@ -1889,6 +1889,67 @@ function getUserInitial(username: string): string {
   opacity: 0.9;
 }
 
+/* ==================== 标签页选择列表样式 ==================== */
+
+/* 标签页选择列表容器 - 竖向排列，支持滚动 */
+.modal__tab-list {
+  /* 布局 */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  /* 间距 */
+  margin-top: 8px;
+
+  /* 尺寸限制与滚动 */
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* 标签页选择项 - 每个选项占一行 */
+.modal__tab-checkbox {
+  /* 布局 */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  /* 间距 */
+  padding: 6px 10px;
+
+  /* 样式 */
+  border-radius: 6px;
+  cursor: pointer;
+
+  /* 过渡 */
+  transition: background-color 0.15s ease;
+}
+
+.modal__tab-checkbox:hover {
+  background-color: var(--button-hover-bg, rgba(128, 128, 128, 0.12));
+}
+
+/* 标签页选择项中的复选框 */
+.modal__tab-checkbox input[type="checkbox"] {
+  /* 尺寸 */
+  width: 16px;
+  height: 16px;
+
+  /* 光标 */
+  cursor: pointer;
+}
+
+/* 标签页选择项中的文字 */
+.modal__tab-checkbox span {
+  /* 字体 */
+  font-size: 13px;
+  color: var(--text-color);
+
+  /* 溢出处理 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ==================== 共享文件列表样式 ==================== */
 
 .collab-panel__file-list {

@@ -1,4 +1,4 @@
-﻿﻿<script setup lang="ts">
+﻿﻿﻿<script setup lang="ts">
 /**
  * Favorites 组件 - 收藏夹面板
  *
@@ -380,6 +380,11 @@ onMounted(() => {
 /** 组件卸载时移除全局事件监听 */
 onUnmounted(() => {
   document.removeEventListener("click", onDocumentClick);
+});
+
+/** 暴露刷新方法给父组件 */
+defineExpose({
+  refresh: loadTree,
 });
 
 /**

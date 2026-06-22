@@ -187,6 +187,10 @@ const tabSaveConfirmRef =
 const favoriteSelectRef =
   ref<InstanceType<typeof FavoriteSelectDialog> | null>(null);
 
+/** 侧边栏标签页组件引用，用于主动调用刷新方法 */
+const sidebarTabsRef =
+  ref<InstanceType<typeof SidebarTabs> | null>(null);
+
 // ==================== 侧边栏状态 ====================
 
 /** 大纲面板是否折叠 */
@@ -507,6 +511,8 @@ async function openFile(): Promise<void> {
 
       try {
         await invoke("add_recent_file", { path });
+        // 立即刷新侧边栏最近访问列表，使新打开的文件立即显示
+        refreshSidebarLists();
       } catch (e) {
         console.error("记录最近文件失败:", e);
       }
@@ -514,6 +520,21 @@ async function openFile(): Promise<void> {
   } catch (error) {
     console.error("打开文件失败:", error);
     alert(`打开文件失败: ${error}`);
+  }
+}
+
+/**
+ * 刷新侧边栏列表（最近访问 + 收藏夹）
+ * 当打开新文件或收藏文件后调用，保证侧边栏数据与后端保持同步
+ */
+function refreshSidebarLists(): void {
+  // 当前激活的是"最近访问"标签页时，立即重新加载最近文件
+  if (sidebarActiveTab.value === "recent") {
+    sidebarTabsRef.value?.refreshRecent();
+  }
+  // 当前激活的是"收藏夹"标签页时，立即重新加载收藏夹目录树
+  if (sidebarActiveTab.value === "favorites") {
+    sidebarTabsRef.value?.refreshFavorites();
   }
 }
 
@@ -904,6 +925,8 @@ async function handleSidebarOpenFile(path: string): Promise<void> {
     // 记录到最近文件
     try {
       await invoke("add_recent_file", { path });
+      // 立即刷新侧边栏最近访问列表
+      refreshSidebarLists();
     } catch { /* 忽略 */ }
   } catch (error) {
     console.error("打开文件失败:", error);
@@ -961,6 +984,7 @@ async function handleAddFavorite(path: string): Promise<void> {
       >
         <SidebarTabs
           v-if="!outlineCollapsed"
+          ref="sidebarTabsRef"
           :active-tab="sidebarActiveTab"
           :outline="activeOutline"
           @update:active-tab="(val) => sidebarActiveTab = val as 'outline' | 'recent' | 'favorites'"

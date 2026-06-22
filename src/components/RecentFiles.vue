@@ -191,6 +191,15 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener("click", handleGlobalClick);
 });
+
+// ==================== 暴露方法 ====================
+
+/**
+ * 暴露 refresh 方法给父组件，用于在打开新文件后主动刷新最近文件列表
+ */
+defineExpose({
+  refresh: loadRecentFiles,
+});
 </script>
 
 <template>

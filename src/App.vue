@@ -200,6 +200,18 @@ const outlineCollapsed = ref<boolean>(false);
 /** 侧边栏当前激活的选项卡：outline | recent | favorites */
 const sidebarActiveTab = ref<"outline" | "recent" | "favorites">("outline");
 
+/** 左侧边栏宽度 */
+const leftSidebarWidth = ref<number>(200);
+
+/** 右侧边栏宽度 */
+const rightSidebarWidth = ref<number>(260);
+
+/** 是否正在拖动左侧边栏 */
+const isDraggingLeft = ref<boolean>(false);
+
+/** 是否正在拖动右侧边栏 */
+const isDraggingRight = ref<boolean>(false);
+
 // ==================== 协作状态 ====================
 
 /** 协作面板是否可见 */
@@ -712,6 +724,44 @@ function handleCtrlF(e: KeyboardEvent): void {
   }
 }
 
+function startDragLeft(e: MouseEvent): void {
+  e.preventDefault();
+  isDraggingLeft.value = true;
+  document.addEventListener("mousemove", onDragLeft);
+  document.addEventListener("mouseup", stopDragLeft);
+}
+
+function onDragLeft(e: MouseEvent): void {
+  if (!isDraggingLeft.value) return;
+  const newWidth = e.clientX;
+  leftSidebarWidth.value = Math.max(80, Math.min(400, newWidth));
+}
+
+function stopDragLeft(): void {
+  isDraggingLeft.value = false;
+  document.removeEventListener("mousemove", onDragLeft);
+  document.removeEventListener("mouseup", stopDragLeft);
+}
+
+function startDragRight(e: MouseEvent): void {
+  e.preventDefault();
+  isDraggingRight.value = true;
+  document.addEventListener("mousemove", onDragRight);
+  document.addEventListener("mouseup", stopDragRight);
+}
+
+function onDragRight(e: MouseEvent): void {
+  if (!isDraggingRight.value) return;
+  const newWidth = window.innerWidth - e.clientX;
+  rightSidebarWidth.value = Math.max(150, Math.min(500, newWidth));
+}
+
+function stopDragRight(): void {
+  isDraggingRight.value = false;
+  document.removeEventListener("mousemove", onDragRight);
+  document.removeEventListener("mouseup", stopDragRight);
+}
+
 async function restoreTabs(): Promise<void> {
   try {
     const tabsJson: string = await invoke("get_open_tabs");
@@ -1026,20 +1076,11 @@ async function handleAddFavorite(path: string): Promise<void> {
       @toggle-settings="settingsPanelVisible = !settingsPanelVisible"
     />
 
-    <TabBar
-      :tabs="tabs"
-      :active-tab-id="activeTabId"
-      @select-tab="selectTab"
-      @close-tab="closeTab"
-      @new-tab="newTab"
-      @close-all-tabs="closeAllTabs"
-      @close-unmodified-tabs="closeUnmodifiedTabs"
-    />
-
     <div class="main-layout">
       <div
         class="outline-wrapper"
         :class="{ 'outline-wrapper--collapsed': outlineCollapsed }"
+        :style="{ width: outlineCollapsed ? '0px' : leftSidebarWidth + 'px', minWidth: outlineCollapsed ? '0px' : leftSidebarWidth + 'px' }"
       >
         <SidebarTabs
           v-if="!outlineCollapsed"
@@ -1066,101 +1107,118 @@ async function handleAddFavorite(path: string): Promise<void> {
         </svg>
       </div>
 
+      <div class="left-resizer" @mousedown="startDragLeft" :class="{ 'left-resizer--hidden': outlineCollapsed }"></div>
+
       <main class="main-content">
-        <div v-if="!activeTab" class="empty-state">
-          <div class="empty-state__icon">
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              width="64"
-              height="64"
-            >
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <line x1="16" y1="13" x2="8" y2="13" />
-              <line x1="16" y1="17" x2="8" y2="17" />
-              <polyline points="10 9 9 9 8 9" />
-            </svg>
-          </div>
-          <h2 class="empty-state__title">欢迎使用 MarkStudio</h2>
-          <p class="empty-state__desc">
-            点击上方"新建"按钮创建新文档，或点击"打开"按钮打开已有的 Markdown 文件
-          </p>
-          <div class="empty-state__actions">
-            <button class="empty-state__btn" @click="newTab">
+        <TabBar
+          :tabs="tabs"
+          :active-tab-id="activeTabId"
+          @select-tab="selectTab"
+          @close-tab="closeTab"
+          @new-tab="newTab"
+          @close-all-tabs="closeAllTabs"
+          @close-unmodified-tabs="closeUnmodifiedTabs"
+        />
+
+        <div class="editor-wrapper">
+          <div v-if="!activeTab" class="empty-state">
+            <div class="empty-state__icon">
               <svg
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
-                stroke-width="2"
-                width="16"
-                height="16"
+                stroke-width="1.5"
+                width="64"
+                height="64"
               >
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" />
+                <polyline points="10 9 9 9 8 9" />
               </svg>
-              新建文档
-            </button>
-            <button class="empty-state__btn" @click="openFile">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                width="16"
-                height="16"
-              >
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-              </svg>
-              打开文件
-            </button>
+            </div>
+            <h2 class="empty-state__title">欢迎使用 MarkStudio</h2>
+            <p class="empty-state__desc">
+              点击上方"新建"按钮创建新文档，或点击"打开"按钮打开已有的 Markdown 文件
+            </p>
+            <div class="empty-state__actions">
+              <button class="empty-state__btn" @click="newTab">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  width="16"
+                  height="16"
+                >
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                新建文档
+              </button>
+              <button class="empty-state__btn" @click="openFile">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  width="16"
+                  height="16"
+                >
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                </svg>
+                打开文件
+              </button>
+            </div>
           </div>
+
+          <template v-if="activeTab">
+            <Editor
+              v-if="activeTab.mode === 'source'"
+              ref="sourceEditorRef"
+              v-model="activeContent"
+              placeholder="请输入 Markdown 内容..."
+              :collab-enabled="collabConnected"
+              :collab-peers="collabPeers"
+              :local-peer-id="localPeerId"
+              :image-cache-dir="imageCacheDir"
+              @collab-operation="onEditorOperation"
+              @collab-cursor="onEditorCursor"
+            />
+
+            <Preview
+              v-else-if="activeTab.mode === 'preview'"
+              :html="activeParsedHtml"
+            />
+
+            <SplitPane v-else>
+              <template #left>
+                <Editor
+                  ref="splitEditorRef"
+                  v-model="activeContent"
+                  placeholder="请输入 Markdown 内容..."
+                  :collab-enabled="collabConnected"
+                  :collab-peers="collabPeers"
+                  :local-peer-id="localPeerId"
+                  :image-cache-dir="imageCacheDir"
+                  @collab-operation="onEditorOperation"
+                  @collab-cursor="onEditorCursor"
+                />
+              </template>
+              <template #right>
+                <Preview :html="activeParsedHtml" />
+              </template>
+            </SplitPane>
+          </template>
         </div>
-
-        <template v-if="activeTab">
-          <Editor
-            v-if="activeTab.mode === 'source'"
-            ref="sourceEditorRef"
-            v-model="activeContent"
-            placeholder="请输入 Markdown 内容..."
-            :collab-enabled="collabConnected"
-            :collab-peers="collabPeers"
-            :local-peer-id="localPeerId"
-            :image-cache-dir="imageCacheDir"
-            @collab-operation="onEditorOperation"
-            @collab-cursor="onEditorCursor"
-          />
-
-          <Preview
-            v-else-if="activeTab.mode === 'preview'"
-            :html="activeParsedHtml"
-          />
-
-          <SplitPane v-else>
-            <template #left>
-              <Editor
-                ref="splitEditorRef"
-                v-model="activeContent"
-                placeholder="请输入 Markdown 内容..."
-                :collab-enabled="collabConnected"
-                :collab-peers="collabPeers"
-                :local-peer-id="localPeerId"
-                :image-cache-dir="imageCacheDir"
-                @collab-operation="onEditorOperation"
-                @collab-cursor="onEditorCursor"
-              />
-            </template>
-            <template #right>
-              <Preview :html="activeParsedHtml" />
-            </template>
-          </SplitPane>
-        </template>
       </main>
+
+      <div class="right-resizer" @mousedown="startDragRight" :class="{ 'right-resizer--hidden': !collabPanelVisible }"></div>
 
       <CollaborationPanel
         v-show="collabPanelVisible"
+        :style="{ width: rightSidebarWidth + 'px', minWidth: rightSidebarWidth + 'px' }"
         :current-document="activeTab?.content ?? ''"
         :tabs="tabs"
         :active-tab-id="activeTabId"
@@ -1288,7 +1346,48 @@ body,
   transform: rotate(180deg);
 }
 
+.left-resizer {
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  background-color: var(--border-color);
+  flex-shrink: 0;
+  transition: background-color 0.2s ease;
+}
+
+.left-resizer:hover {
+  background-color: var(--button-active-text);
+}
+
+.left-resizer--hidden {
+  display: none;
+}
+
+.right-resizer {
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  background-color: var(--border-color);
+  flex-shrink: 0;
+  transition: background-color 0.2s ease;
+}
+
+.right-resizer:hover {
+  background-color: var(--button-active-text);
+}
+
+.right-resizer--hidden {
+  display: none;
+}
+
 .main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.editor-wrapper {
   flex: 1;
   display: flex;
   overflow: hidden;

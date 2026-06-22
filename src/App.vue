@@ -579,6 +579,13 @@ async function saveFileAs(): Promise<void> {
       activeTab.value.title = getFileName(path);
       activeTab.value.lastSavedContent = activeTab.value.content;
       activeTab.value.isDirty = false;
+
+      try {
+        await invoke("add_recent_file", { path });
+        refreshSidebarLists();
+      } catch (e) {
+        console.error("记录最近文件失败:", e);
+      }
     }
   } catch (error) {
     console.error("另存为文件失败:", error);

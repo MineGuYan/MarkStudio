@@ -40,6 +40,58 @@ use super::network::{
 use super::ot::{apply_operation, Operation};
 
 // ============================================================================
+// 辅助函数
+// ============================================================================
+
+/// 计算字符串的字符数（Unicode 标量值数量），而非字节长度。
+///
+/// 对于多字节 UTF-8 字符（如中文），字符数小于字节长度。
+/// 例如："啊" 的字节长度为 3，但字符数为 1。
+#[inline]
+fn char_count(s: &str) -> usize {
+    s.chars().count()
+}
+
+/// 根据远程操作调整所有远程成员的光标位置。
+///
+/// 当远程成员执行了 Insert 或 Delete 操作后，其他成员的光标位置
+/// 需要根据操作的影响进行相应调整，以保持光标与文本的相对位置不变.
+///
+/// # 参数
+/// - `peers`: 对等方列表的可变引用
+/// - `op`: 远程成员执行的操作
+/// - `exclude_peer_id`: 要排除的对等方 ID（通常是操作的发送者，其光标位置由发送者自己维护）
+fn adjust_peer_cursors_for_operation(
+    peers: &mut Vec<PeerInfo>,
+    op: &Operation,
+    exclude_peer_id: &str,
+) {
+    for peer in peers.iter_mut() {
+        // 排除操作的发送者，其光标位置由发送者自己通过 CursorSync 消息更新
+        if peer.peer_id == exclude_peer_id {
+            continue;
+        }
+
+        match op {
+            Operation::Insert { position, text } => {
+                let insert_len = char_count(text);
+                // 如果光标位置在插入点或之后，需要右移
+                if peer.cursor_position >= *position {
+                    peer.cursor_position += insert_len;
+                }
+            }
+            Operation::Delete { position, length } => {
+                let delete_len = *length;
+                if peer.cursor_position > *position {
+                    // 光标在删除点之后，需要左移，但不能超过删除起始位置
+                    peer.cursor_position = peer.cursor_position.saturating_sub(delete_len).max(*position);
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
 // 类型别名
 // ============================================================================
 
@@ -442,7 +494,7 @@ pub async fn join_room(
 
                         // 编辑操作同步——应用远程操作到本地文档
                         CollaborationMessage::OperationSync {
-                            peer_id: _sender_peer_id,
+                            peer_id: sender_peer_id,
                             operation,
                         } => {
                             if let Ok(op) = serde_json::from_value::<Operation>(operation) {
@@ -461,6 +513,14 @@ pub async fn join_room(
                                                 &cache_dir,
                                             );
                                     }
+
+                                    // 调整其他远程成员的光标位置，保持光标与文本的相对位置不变
+                                    // 注意：这里传入 sender_peer_id 用于排除操作发送者
+                                    adjust_peer_cursors_for_operation(
+                                        &mut session.peers,
+                                        &op,
+                                        &sender_peer_id,
+                                    );
                                 }
                             }
                         }
@@ -1640,8 +1700,21 @@ async fn handle_connection(
                                             &cache_dir,
                                         );
                                 }
+
+                                // 调整其他远程成员的光标位置，保持光标与文本的相对位置不变
+                                adjust_peer_cursors_for_operation(
+                                    &mut session.peers,
+                                    &op,
+                                    &sender_peer_id,
+                                );
                             }
                         }
+
+                        // 克隆当前对等方列表，用于广播更新后的光标位置
+                        let peers_to_broadcast = {
+                            let session_guard = CURRENT_SESSION.lock().unwrap();
+                            session_guard.as_ref().map(|s| s.peers.clone())
+                        };
 
                         // 广播给其他客户端（排除发送者）
                         let forward_msg = CollaborationMessage::OperationSync {
@@ -1654,6 +1727,17 @@ async fn handle_connection(
                         for (pid, tx) in clients.iter() {
                             if *pid != sender_peer_id {
                                 let _ = tx.send(forward_json.clone());
+                            }
+                        }
+                        drop(clients); // 释放客户端列表锁
+
+                        // 广播更新后的对等方列表（包括调整后的光标位置）
+                        if let Some(peers) = peers_to_broadcast {
+                            let peer_list_msg = CollaborationMessage::PeerListUpdate { peers };
+                            let peer_list_json = serialize_message(&peer_list_msg).unwrap_or_default();
+                            let clients = client_txs.lock().unwrap();
+                            for (_, tx) in clients.iter() {
+                                let _ = tx.send(peer_list_json.clone());
                             }
                         }
                     }

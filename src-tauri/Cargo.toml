@@ -32,4 +32,7 @@ base64 = "0.22"
 encoding_rs = "0.8"
 regex = "1"
 futures-util = "0.3"
+# socket2 用于在创建 TCP 监听器时设置 IPV6_V6ONLY=0，
+# 实现 IPv4/IPv6 双栈监听；该 crate 已是 tokio 的传递依赖，此处显式声明便于直接调用
+socket2 = "0.6"
 

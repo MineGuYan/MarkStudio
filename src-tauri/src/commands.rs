@@ -186,7 +186,7 @@ pub async fn join_collab_room(
     match session.as_ref() {
         Some(s) => Ok(crate::collaboration::session::RoomInfo {
             room_id: s.room_id.clone(),
-            host_ip: host,
+            host_ips: s.host_ips.clone(),
             port,
             peer_count: s.peers.len(),
         }),

@@ -24,12 +24,12 @@
 //! - 发送本地编辑操作到主机
 //! - 接收主机广播的其他客户端操作并应用到本地文档
 
-use std::net::UdpSocket;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -61,8 +61,8 @@ type ClientSenderList = Arc<Mutex<Vec<(String, mpsc::UnboundedSender<String>)>>>
 pub struct RoomInfo {
     /// 房间唯一标识符（UUID v4）
     pub room_id: String,
-    /// 主机 IP 地址
-    pub host_ip: String,
+    /// 主机 IP 地址列表（包含 IPv4 和 IPv6）
+    pub host_ips: Vec<String>,
     /// WebSocket 监听端口
     pub port: u16,
     /// 当前在线人数
@@ -86,6 +86,8 @@ pub struct CollaborationSession {
     pub current_document_path: Option<String>,
     /// 是否为房间主机
     pub is_host: bool,
+    /// 主机 IP 地址列表（主机端包含所有可用 IP，客户端仅包含连接的 IP）
+    pub host_ips: Vec<String>,
     /// 在线对等方列表
     pub peers: Vec<PeerInfo>,
     /// 本地对等方唯一标识
@@ -198,10 +200,6 @@ pub async fn create_room(
 
     // 获取本地 IP 地址
     let ips = get_local_ip()?;
-    let host_ip = ips
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "127.0.0.1".to_string());
 
     // 生成本地对等方 ID
     let local_peer_id = format!("host-{}", &room_id[..8]);
@@ -214,19 +212,11 @@ pub async fn create_room(
 
     // 使用 TcpSocket 创建套接字，设置 SO_REUSEADDR 避免 Windows 上
     // 端口被释放后短时间内无法重新绑定的问题（TIME_WAIT）。
-    let addr: std::net::SocketAddr = format!("0.0.0.0:{}", port)
-        .parse()
-        .map_err(|e| format!("解析地址 0.0.0.0:{} 失败: {}", port, e))?;
-    let socket = TcpSocket::new_v4().map_err(|e| format!("创建 IPv4 套接字失败: {}", e))?;
-    socket
-        .set_reuseaddr(true)
-        .map_err(|e| format!("设置 SO_REUSEADDR 失败: {}", e))?;
-    socket
-        .bind(addr)
-        .map_err(|e| format!("绑定端口 {} 失败: {}", port, e))?;
-    let listener = socket
-        .listen(128)
-        .map_err(|e| format!("监听端口 {} 失败: {}", port, e))?;
+    //
+    // 协议族策略：优先使用 IPv6 双栈套接字（`[::]:port` + `IPV6_V6ONLY=0`），
+    // 这样同一个端口可同时接受 IPv4 与 IPv6 客户端的连接，
+    // 最大化协作的连通性。当本机不支持 IPv6 时，回退到纯 IPv4 套接字。
+    let listener: TcpListener = create_dual_stack_listener(port)?;
 
     let actual_port = listener
         .local_addr()
@@ -269,6 +259,7 @@ pub async fn create_room(
         document: document.to_string(),
         current_document_path: None,
         is_host: true,
+        host_ips: ips.clone(),
         peers: vec![host_peer],
         local_peer_id: local_peer_id.clone(),
         local_username: username.to_string(),
@@ -287,7 +278,7 @@ pub async fn create_room(
 
     Ok(RoomInfo {
         room_id,
-        host_ip,
+        host_ips: ips,
         port: actual_port,
         peer_count: 1,
     })
@@ -319,8 +310,8 @@ pub async fn join_room(
     // 主机和客户端运行在不同的进程实例中，各自拥有独立的全局会话。
     // 测试场景中同一进程内模拟主机+客户端时，由调用方负责管理会话状态。
 
-    // 构建 WebSocket 连接地址
-    let url = format!("ws://{}:{}", host, port);
+    // 构建 WebSocket 连接地址（自动为 IPv6 地址添加方括号）
+    let url = format_ws_url(host, port);
 
     // 连接到主机 WebSocket 服务器
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
@@ -395,6 +386,7 @@ pub async fn join_room(
                 document: document.clone(),
                 current_document_path: None,
                 is_host: false,
+                host_ips: vec![host.to_string()],
                 peers: Vec::new(), // 等收到 PeerListUpdate 后更新
                 local_peer_id: peer_id.clone(),
                 local_username: username.to_string(),
@@ -813,23 +805,96 @@ pub fn send_cursor_sync(position: usize) -> Result<(), String> {
 // 网络工具函数
 // ============================================================================
 
-/// 获取本机所有非回环的 IPv4 地址。
+/// 将主机地址格式化为合法的 WebSocket URL。
 ///
-/// 通过向外部地址发起 UDP "连接"（不实际发送数据），
-/// 获取操作系统选择的本机出口 IP 地址。
+/// 根据 `host` 的类型生成符合 RFC 3986 的 WebSocket 地址：
+/// - IPv6 地址必须使用方括号包裹（如 `[::1]`、`[2001:db8::1]`），
+///   否则冒号会与端口分隔符产生歧义，导致 URL 解析失败。
+/// - IPv4 地址与主机名直接拼接即可。
+/// - 如果用户已自行添加方括号，则原样保留，避免重复包裹。
+///
+/// # 参数
+/// - `host`: 用户输入的主机 IP（IPv4/IPv6）或主机名
+/// - `port`: WebSocket 端口
 ///
 /// # 返回
-/// - `Ok(Vec<String>)`: IP 地址列表
-/// - `Err(String)`: 获取失败，返回错误描述
+/// 格式化后的 WebSocket URL 字符串，固定使用 `ws://` 协议
+pub fn format_ws_url(host: &str, port: u16) -> String {
+    let trimmed = host.trim();
+
+    // 已带方括号的情况（如用户输入 "[::1]"）——原样使用
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        return format!("ws://{}:{}", trimmed, port);
+    }
+
+    // 尝试解析为标准 IPv6 地址，需要方括号包裹
+    if trimmed.parse::<std::net::Ipv6Addr>().is_ok() {
+        return format!("ws://[{}]:{}", trimmed, port);
+    }
+
+    // 通过冒号个数粗略判断：IPv6 地址至少包含 2 个冒号（如 `::1`、`fe80::1`）
+    // 主机名不允许出现冒号，因此该判断对合法输入是安全的。
+    let colon_count = trimmed.matches(':').count();
+    if colon_count >= 2 {
+        return format!("ws://[{}]:{}", trimmed, port);
+    }
+
+    // IPv4 地址或主机名直接拼接
+    format!("ws://{}:{}", trimmed, port)
+}
+
+/// 获取本机所有非回环的 IP 地址，同时支持 IPv4 与 IPv6。
+///
+/// 实现原理：分别创建 IPv4 与 IPv6 的 UDP 套接字，
+/// 通过向外部 DNS 地址发起 UDP "连接"（不实际发送数据），
+/// 让操作系统选择本机对应协议族的出口 IP，
+/// 借此获得本机所有可用的 IPv4/IPv6 地址。
+///
+/// - IPv4 探测目标：`8.8.8.8:80`（Google DNS）
+/// - IPv6 探测目标：`[2001:4860:4860::8888]:80`（Google IPv6 DNS）
+///
+/// 任一探测失败（如本机无 IPv6 网络）不会影响另一协议族的获取。
+///
+/// # 返回
+/// - `Ok(Vec<String>)`: 可用 IP 地址列表（可能同时包含 IPv4 与 IPv6），
+///   顺序为 IPv4 在前、IPv6 在后
+/// - `Err(String)`: 两种探测均失败，返回错误描述
 pub fn get_local_ip() -> Result<Vec<String>, String> {
-    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("绑定 UDP 套接字失败: {}", e))?;
-    socket
-        .connect("8.8.8.8:80")
-        .map_err(|e| format!("连接外部地址失败: {}", e))?;
-    let addr = socket
-        .local_addr()
-        .map_err(|e| format!("获取本地地址失败: {}", e))?;
-    Ok(vec![addr.ip().to_string()])
+    let mut ips: Vec<String> = Vec::new();
+
+    // --- 第一步：获取本机 IPv4 地址 ---
+    // 通过向 IPv4 外部地址发起 UDP "连接"，让操作系统选择 IPv4 出口 IP
+    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                let ip = addr.ip().to_string();
+                if !ips.contains(&ip) {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+
+    // --- 第二步：获取本机 IPv6 地址 ---
+    // 通过向 IPv6 外部地址发起 UDP "连接"，让操作系统选择 IPv6 出口 IP
+    // 若本机无 IPv6 网络或目标不可达，此步骤静默失败，不影响 IPv4 结果
+    if let Ok(socket) = UdpSocket::bind("[::]:0") {
+        if socket.connect("[2001:4860:4860::8888]:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                let ip = addr.ip().to_string();
+                if !ips.contains(&ip) {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+
+    // 两种探测都失败时返回错误
+    if ips.is_empty() {
+        return Err("无法获取本机 IP 地址（IPv4 与 IPv6 探测均失败）".to_string());
+    }
+
+    Ok(ips)
 }
 
 // ============================================================================
@@ -1114,6 +1179,127 @@ pub fn get_shared_files() -> Result<Vec<SharedFileInfo>, String> {
         .ok_or_else(|| "当前没有活跃的协作会话".to_string())?;
 
     Ok(session.shared_files.clone())
+}
+
+// ============================================================================
+// 内部辅助函数：创建双栈监听器
+// ============================================================================
+
+/// 创建一个支持 IPv4/IPv6 双栈（或纯 IPv4 兜底）的 TCP 监听器。
+///
+/// 实现策略：
+/// 1. **首选 IPv6 双栈**：使用 `socket2` 创建 IPv6 套接字，
+///    绑定到 `[::]:port`（IPv6 全零地址），
+///    并通过 `set_only_v6(false)` 关闭 `IPV6_V6ONLY` 选项，
+///    使其同时接受 IPv4 与 IPv6 客户端连接。
+/// 2. **回退到 IPv4**：当本机完全不支持 IPv6 时（如某些精简系统），
+///    使用 IPv4 套接字绑定到 `0.0.0.0:port`。
+///
+/// 无论走哪条路径，都会设置 `SO_REUSEADDR` 避免 Windows 上
+/// 端口被释放后短时间内无法重新绑定的问题（TIME_WAIT），
+/// 并设置非阻塞模式以便与 tokio 集成。
+///
+/// # 参数
+/// - `port`: 要监听的 TCP 端口
+///
+/// # 返回
+/// - `Ok(TcpListener)`: 创建成功的 tokio TCP 监听器
+/// - `Err(String)`: 两种路径均失败时返回错误描述
+fn create_dual_stack_listener(port: u16) -> Result<TcpListener, String> {
+    // --- 路径 1：尝试 IPv6 双栈监听（首选） ---
+    // 通过 socket2 创建底层套接字，可直接设置 IPV6_V6ONLY=0
+    let v6_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
+
+    match create_socket2_listener(&v6_addr, true) {
+        Ok(std_listener) => {
+            // 成功创建 IPv6 双栈监听器，转换为 tokio TcpListener
+            if let Err(e) = std_listener.set_nonblocking(true) {
+                eprintln!(
+                    "[MarkStudio] 设置非阻塞模式失败，将回退到 IPv4: {}",
+                    e
+                );
+            } else {
+                match TcpListener::from_std(std_listener) {
+                    Ok(listener) => return Ok(listener),
+                    Err(e) => {
+                        eprintln!(
+                            "[MarkStudio] 将 IPv6 监听器转换为 tokio 失败，将回退到 IPv4: {}",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[MarkStudio] 创建 IPv6 双栈监听器失败: {}，将回退到 IPv4", e);
+        }
+    }
+
+    // --- 路径 2：回退到纯 IPv4 监听 ---
+    let v4_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+    let std_listener = create_socket2_listener(&v4_addr, false)
+        .map_err(|e| format!("创建 IPv4 监听器也失败: {}", e))?;
+    std_listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("设置非阻塞模式失败: {}", e))?;
+    let listener = TcpListener::from_std(std_listener)
+        .map_err(|e| format!("将 IPv4 监听器转换为 tokio 失败: {}", e))?;
+    Ok(listener)
+}
+
+/// 使用 `socket2` 创建已绑定并监听的 TCP 套接字。
+///
+/// # 参数
+/// - `addr`: 要绑定的 Socket 地址
+/// - `dual_stack`: 是否启用 IPv6 双栈（仅对 IPv6 套接字生效，
+///   IPv4 套接字会忽略此参数）
+///
+/// # 返回
+/// - `Ok(StdTcpListener)`: 创建成功的标准库 TCP 监听器
+/// - `Err(String)`: 失败时返回错误描述
+fn create_socket2_listener(
+    addr: &SocketAddr,
+    dual_stack: bool,
+) -> Result<std::net::TcpListener, String> {
+    use socket2::{Domain, Socket, Type};
+
+    // 根据地址族选择套接字域
+    let domain = if addr.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+
+    // 创建套接字
+    let socket = Socket::new(domain, Type::STREAM, None)
+        .map_err(|e| format!("创建套接字失败: {}", e))?;
+
+    // 设置 SO_REUSEADDR：避免 Windows 上 TIME_WAIT 状态导致端口无法立即重用
+    socket
+        .set_reuse_address(true)
+        .map_err(|e| format!("设置 SO_REUSEADDR 失败: {}", e))?;
+
+    // 对 IPv6 套接字，关闭 IPV6_V6ONLY 标志以启用双栈监听
+    // 这样绑定的 [::]:port 可同时接受 IPv4 与 IPv6 客户端
+    if addr.is_ipv6() && dual_stack {
+        socket
+            .set_only_v6(false)
+            .map_err(|e| format!("关闭 IPV6_V6ONLY 失败: {}", e))?;
+    }
+
+    // 绑定到指定地址（需将 std SocketAddr 转换为 socket2 SockAddr）
+    let sock_addr = socket2::SockAddr::from(*addr);
+    socket
+        .bind(&sock_addr)
+        .map_err(|e| format!("绑定地址 {} 失败: {}", addr, e))?;
+
+    // 开始监听（backlog = 128）
+    socket
+        .listen(128)
+        .map_err(|e| format!("监听失败: {}", e))?;
+
+    // 转换为标准库 TcpListener
+    Ok(socket.into())
 }
 
 // ============================================================================
@@ -1775,7 +1961,9 @@ mod tests {
                 room_id: "test-room".to_string(),
                 password: String::new(),
                 document: String::new(),
+                current_document_path: None,
                 is_host: true,
+                host_ips: vec!["192.168.1.100".to_string()],
                 peers: Vec::new(),
                 local_peer_id: "test-peer".to_string(),
                 local_username: "tester".to_string(),
@@ -1804,7 +1992,7 @@ mod tests {
     fn test_room_info_serialization() {
         let room_info = RoomInfo {
             room_id: "test-room-123".to_string(),
-            host_ip: "192.168.1.100".to_string(),
+            host_ips: vec!["192.168.1.100".to_string(), "2001:db8::1".to_string()],
             port: 9090,
             peer_count: 3,
         };
@@ -1813,7 +2001,7 @@ mod tests {
         let deserialized: RoomInfo = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.room_id, "test-room-123");
-        assert_eq!(deserialized.host_ip, "192.168.1.100");
+        assert_eq!(deserialized.host_ips, vec!["192.168.1.100", "2001:db8::1"]);
         assert_eq!(deserialized.port, 9090);
         assert_eq!(deserialized.peer_count, 3);
     }
@@ -1830,19 +2018,87 @@ mod tests {
         match ips {
             Ok(ip_list) => {
                 assert!(!ip_list.is_empty(), "IP 列表不应为空");
+                // IPv4 地址应在 IPv6 之前
+                let mut has_v4 = false;
+                let mut has_v6 = false;
                 for ip in &ip_list {
-                    // 验证是合法的 IPv4 地址格式
+                    // 验证是合法的 IPv4 或 IPv6 地址格式
+                    let is_v4 = ip.parse::<std::net::Ipv4Addr>().is_ok();
+                    let is_v6 = ip.parse::<std::net::Ipv6Addr>().is_ok();
                     assert!(
-                        ip.parse::<std::net::Ipv4Addr>().is_ok(),
-                        "{} 不是合法的 IPv4 地址",
+                        is_v4 || is_v6,
+                        "{} 既不是合法的 IPv4 也不是 IPv6 地址",
                         ip
                     );
+                    if is_v4 {
+                        has_v4 = true;
+                    }
+                    if is_v6 {
+                        has_v6 = true;
+                    }
                 }
+                // 至少能获取到一种协议族的 IP（取决于运行环境）
+                assert!(has_v4 || has_v6, "应至少能获取一种协议族的 IP 地址");
             }
             Err(_) => {
                 // 无网络时可能失败，这是可接受的
             }
         }
+    }
+
+    // ========================================================================
+    // format_ws_url 测试（IPv4/IPv6 URL 格式化）
+    // ========================================================================
+
+    #[test]
+    fn test_format_ws_url_ipv4() {
+        // 普通 IPv4 地址应直接拼接端口
+        assert_eq!(format_ws_url("192.168.1.100", 8080), "ws://192.168.1.100:8080");
+        // 主机名也应直接拼接
+        assert_eq!(format_ws_url("localhost", 8080), "ws://localhost:8080");
+        // 127.0.0.1 本地回环
+        assert_eq!(format_ws_url("127.0.0.1", 9090), "ws://127.0.0.1:9090");
+    }
+
+    #[test]
+    fn test_format_ws_url_ipv6_full() {
+        // 完整的 IPv6 地址必须用方括号包裹
+        assert_eq!(
+            format_ws_url("2001:db8:85a3::8a2e:370:7334", 8080),
+            "ws://[2001:db8:85a3::8a2e:370:7334]:8080"
+        );
+    }
+
+    #[test]
+    fn test_format_ws_url_ipv6_loopback() {
+        // IPv6 回环地址 ::1 必须用方括号包裹
+        assert_eq!(format_ws_url("::1", 8080), "ws://[::1]:8080");
+    }
+
+    #[test]
+    fn test_format_ws_url_ipv6_already_bracketed() {
+        // 已带方括号的 IPv6 地址应原样使用，避免重复包裹
+        assert_eq!(format_ws_url("[::1]", 8080), "ws://[::1]:8080");
+        assert_eq!(
+            format_ws_url("[2001:db8::1]", 9090),
+            "ws://[2001:db8::1]:9090"
+        );
+    }
+
+    #[test]
+    fn test_format_ws_url_ipv6_link_local() {
+        // IPv6 链路本地地址（fe80:: 前缀）
+        assert_eq!(
+            format_ws_url("fe80::1", 8080),
+            "ws://[fe80::1]:8080"
+        );
+    }
+
+    #[test]
+    fn test_format_ws_url_trims_whitespace() {
+        // 输入两端空白应被自动去除
+        assert_eq!(format_ws_url("  192.168.1.1  ", 8080), "ws://192.168.1.1:8080");
+        assert_eq!(format_ws_url("  ::1  ", 8080), "ws://[::1]:8080");
     }
 
     // ========================================================================
@@ -1865,7 +2121,9 @@ mod tests {
                 room_id: "test".to_string(),
                 password: String::new(),
                 document: "Hello".to_string(),
+                current_document_path: None,
                 is_host: true,
+                host_ips: vec!["192.168.1.100".to_string()],
                 peers: Vec::new(),
                 local_peer_id: "peer-1".to_string(),
                 local_username: "test".to_string(),
@@ -1919,7 +2177,9 @@ mod tests {
                 room_id: "test".to_string(),
                 password: String::new(),
                 document: "Hello World".to_string(),
+                current_document_path: None,
                 is_host: true,
+                host_ips: vec!["192.168.1.100".to_string()],
                 peers: Vec::new(),
                 local_peer_id: "peer-1".to_string(),
                 local_username: "test".to_string(),
@@ -2011,7 +2271,9 @@ mod tests {
                 room_id: "test".to_string(),
                 password: String::new(),
                 document: String::new(),
+                current_document_path: None,
                 is_host: false,
+                host_ips: vec!["192.168.1.100".to_string()],
                 peers: Vec::new(),
                 local_peer_id: "peer-1".to_string(),
                 local_username: "test".to_string(),
@@ -2081,7 +2343,9 @@ mod tests {
                 room_id: "test-room".to_string(),
                 password: String::new(),
                 document: String::new(),
+                current_document_path: None,
                 is_host: true,
+                host_ips: vec!["192.168.1.100".to_string()],
                 peers: vec![PeerInfo {
                     peer_id: "host-1".to_string(),
                     username: "host".to_string(),
@@ -2149,7 +2413,9 @@ mod tests {
                 room_id: "test-room".to_string(),
                 password: String::new(),
                 document: String::new(),
+                current_document_path: None,
                 is_host: false,
+                host_ips: vec!["192.168.1.100".to_string()],
                 peers: Vec::new(),
                 local_peer_id: "client-1".to_string(),
                 local_username: "client".to_string(),
@@ -2218,7 +2484,9 @@ mod tests {
                 room_id: "test".to_string(),
                 password: String::new(),
                 document: String::new(),
+                current_document_path: None,
                 is_host: false,
+                host_ips: vec!["192.168.1.100".to_string()],
                 peers: Vec::new(),
                 local_peer_id: "client-1".to_string(),
                 local_username: "Alice".to_string(),

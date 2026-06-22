@@ -19,8 +19,8 @@ import { invoke } from "@tauri-apps/api/core";
 export interface RoomInfo {
   /** 房间唯一标识 */
   room_id: string;
-  /** 主机 IP 地址 */
-  host_ip: string;
+  /** 主机 IP 地址列表（包含 IPv4 和 IPv6） */
+  host_ips: string[];
   /** 端口号 */
   port: number;
   /** 在线用户数 */
@@ -746,15 +746,19 @@ function getUserInitial(username: string): string {
             {{ roomInfo.room_id }}
           </span>
         </div>
-        <div
-          class="collab-panel__info-item collab-panel__info-item--copyable"
-          title="点击复制主机 IP"
-          @click="copyToClipboard(roomInfo.host_ip, '主机 IP')"
-        >
+        <div class="collab-panel__info-item">
           <span class="collab-panel__info-label">主机 IP</span>
-          <span class="collab-panel__info-value collab-panel__info-value--mono">
-            {{ roomInfo.host_ip }}
-          </span>
+          <div class="collab-panel__info-value">
+            <span
+              v-for="(ip, index) in roomInfo.host_ips"
+              :key="index"
+              class="collab-panel__info-value--mono collab-panel__info-value--copyable"
+              :title="`点击复制 ${ip}`"
+              @click="copyToClipboard(ip, '主机 IP')"
+            >
+              {{ ip }}
+            </span>
+          </div>
         </div>
         <div
           class="collab-panel__info-item collab-panel__info-item--copyable"
@@ -1026,7 +1030,7 @@ function getUserInitial(username: string): string {
                 v-model="joinForm.host"
                 type="text"
                 class="modal__input"
-                placeholder="例如：192.168.1.100"
+                placeholder="例如：192.168.1.100 或 2001:db8::1"
               />
             </label>
             <!-- 端口号 -->
@@ -1424,6 +1428,14 @@ function getUserInitial(username: string): string {
   white-space: nowrap;
 }
 
+/* 多 IP 地址列表布局 */
+.collab-panel__info-value:has(.collab-panel__info-value--mono) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
 /* 可复制的信息条目 */
 .collab-panel__info-item--copyable {
   cursor: pointer;
@@ -1438,6 +1450,23 @@ function getUserInitial(username: string): string {
 }
 
 .collab-panel__info-item--copyable:active {
+  background-color: var(--button-active-bg, rgba(128, 128, 128, 0.2));
+}
+
+/* 可复制的信息值（用于 IP 地址等内联元素） */
+.collab-panel__info-value--copyable {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin: 0 -6px;
+  transition: background-color 0.15s ease;
+}
+
+.collab-panel__info-value--copyable:hover {
+  background-color: var(--button-hover-bg, rgba(128, 128, 128, 0.12));
+}
+
+.collab-panel__info-value--copyable:active {
   background-color: var(--button-active-bg, rgba(128, 128, 128, 0.2));
 }
 

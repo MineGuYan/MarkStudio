@@ -350,7 +350,10 @@ function debouncedParseMarkdown(markdown: string, tabId: number): void {
     if (activeTabId.value !== tabId) return;
 
     try {
-      const html = await invoke<string>("parse_markdown", { markdown });
+      // 获取当前标签页的文件路径，用于解析相对路径的图片
+      const currentTab = tabs.value.find((t) => t.id === tabId);
+      const documentPath = currentTab?.path || null;
+      const html = await invoke<string>("parse_markdown", { markdown, documentPath });
       const tab = tabs.value.find((t) => t.id === tabId);
       if (tab) {
         tab.parsedHtml = html;

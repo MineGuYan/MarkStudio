@@ -13,12 +13,13 @@ use crate::parser;
 ///
 /// # 参数
 /// - `markdown`: 前端传入的 Markdown 源文本
+/// - `document_path`: 文档所在文件路径（可选），用于解析相对路径的图片
 ///
 /// # 返回
 /// 解析后生成的 HTML 字符串
 #[tauri::command]
-pub fn parse_markdown(markdown: String) -> String {
-    parser::parse_markdown_to_html(&markdown)
+pub fn parse_markdown(markdown: String, document_path: Option<String>) -> String {
+    parser::parse_markdown_to_html(&markdown, document_path.as_deref())
 }
 
 /// 读取文件内容

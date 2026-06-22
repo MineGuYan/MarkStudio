@@ -97,8 +97,8 @@ const emit = defineEmits<{
   "document-update": [update: { document: string; path: string | null }];
   /** 本地对等方 ID 更新（用于过滤自己的光标） */
   "local-peer-id": [peerId: string];
-  /** 从共享文件列表打开文件 */
-  "open-file": [path: string];
+  /** 从共享文件列表打开文件（协作模式） */
+  "open-file": [file: SharedFileInfo];
 }>();
 
 // ==================== 状态管理 ====================
@@ -843,7 +843,7 @@ function getUserInitial(username: string): string {
             :key="file.path"
             class="collab-panel__file-item"
             :title="file.path"
-            @click="emit('open-file', file.path)"
+            @click="emit('open-file', file)"
             @contextmenu="handleFileContextMenu($event, file)"
           >
             <span class="collab-panel__file-icon">

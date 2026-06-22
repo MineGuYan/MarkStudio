@@ -42,6 +42,7 @@ import { useShortcuts } from "./composables/useShortcuts";
 import type { OutlineItem } from "./components/Outline.vue";
 import type { Operation } from "./components/Editor.vue";
 import type { PeerInfo } from "./components/CursorOverlay.vue";
+import type { SharedFileInfo } from "./components/CollaborationPanel.vue";
 
 // ==================== 类型定义 ====================
 
@@ -935,6 +936,45 @@ async function handleSidebarOpenFile(path: string): Promise<void> {
 }
 
 /**
+ * 处理协作面板中点击共享文件的操作
+ * 与普通文件打开不同，协作共享文件使用已经通过协作同步过来的内容创建标签页，
+ * 而不是尝试从本地文件系统读取（因为客户端本地不存在主机端的文件路径）。
+ *
+ * @param file - 共享文件信息（包含路径、标题和已同步的内容）
+ */
+function handleCollabOpenFile(file: SharedFileInfo): void {
+  const { path, title, content } = file;
+
+  // 检查文件是否已在标签页中打开（通过路径匹配）
+  const existingTab = tabs.value.find((t) => t.path === path);
+  if (existingTab) {
+    activeTabId.value = existingTab.id;
+    return;
+  }
+
+  // 使用已同步的内容创建新标签页
+  const newTab: TabInfo = {
+    id: nextTabId++,
+    path,
+    title: getFileName(path) || title,
+    content,
+    lastSavedContent: content,
+    isDirty: false,
+    mode: "source",
+    parsedHtml: "",
+    outline: [],
+  };
+  tabs.value.push(newTab);
+  activeTabId.value = newTab.id;
+
+  // 触发解析和大纲提取
+  if (newTab.mode === "preview" || newTab.mode === "split") {
+    debouncedParseMarkdown(newTab.content, newTab.id);
+  }
+  debouncedExtractOutline(newTab.content, newTab.id);
+}
+
+/**
  * 处理最近访问中点击"收藏"后的操作
  * 弹出收藏选择弹窗，用户选择目录后添加收藏
  */
@@ -1109,7 +1149,7 @@ async function handleAddFavorite(path: string): Promise<void> {
         @peers-update="onCollabPeersUpdate"
         @document-update="onCollabDocumentUpdate"
         @local-peer-id="onCollabLocalPeerId"
-        @open-file="handleSidebarOpenFile"
+        @open-file="handleCollabOpenFile"
       />
     </div>
 

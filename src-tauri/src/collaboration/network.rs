@@ -154,11 +154,20 @@ pub struct PeerInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedFileInfo {
     /// 文件完整路径
+    ///
+    /// 主机端保存的是本机文件系统路径，用于主机端定位文件、写入保存等操作。
+    /// 客户端接收到的该字段为空字符串——客户端不应获取到主机端的文件路径。
     pub path: String,
     /// 文件显示名称（不含路径）
     pub title: String,
     /// 文件内容（用于初始同步）
     pub content: String,
+    /// 是否为本地文件（仅主机端为 `true`，客户端接收到的均为 `false`）
+    ///
+    /// 用于前端区分：
+    /// - `true`：主机端自己添加的共享文件，保存时直接写入原路径
+    /// - `false`：来自其他主机的共享文件，保存时应提示"另存为"
+    pub is_local: bool,
 }
 
 // ============================================================================

@@ -295,6 +295,7 @@ pub fn get_collab_status() -> Result<String, String> {
                     "path": f.path,
                     "title": f.title,
                     "content": f.content,
+                    "is_local": f.is_local,
                 })).collect::<Vec<_>>(),
                 "disconnect_reason": null,
             });

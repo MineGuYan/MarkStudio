@@ -1093,6 +1093,7 @@ pub fn add_shared_file(path: &str, title: &str, content: &str) -> Result<(), Str
         path: path.to_string(),
         title: title.to_string(),
         content: content.to_string(),
+        is_local: true, // 主机端添加的共享文件，路径为本机路径
     };
 
     // 如果是第一个共享文件，设置当前协作文档
@@ -1106,8 +1107,9 @@ pub fn add_shared_file(path: &str, title: &str, content: &str) -> Result<(), Str
     }
 
     // 广播共享文件列表更新给所有客户端
+    // 注意：广播给客户端时需要转换为客户端视图，隐藏主机端文件路径
     let update_msg = CollaborationMessage::SharedFileListUpdate {
-        files: session.shared_files.clone(),
+        files: to_client_shared_files(&session.shared_files),
     };
     let update_json = serialize_message(&update_msg)?;
 
@@ -1150,8 +1152,9 @@ pub fn remove_shared_file(path: &str) -> Result<(), String> {
     }
 
     // 广播共享文件列表更新给所有客户端
+    // 注意：广播给客户端时需要转换为客户端视图，隐藏主机端文件路径
     let update_msg = CollaborationMessage::SharedFileListUpdate {
-        files: session.shared_files.clone(),
+        files: to_client_shared_files(&session.shared_files),
     };
     let update_json = serialize_message(&update_msg)?;
 
@@ -1179,6 +1182,37 @@ pub fn get_shared_files() -> Result<Vec<SharedFileInfo>, String> {
         .ok_or_else(|| "当前没有活跃的协作会话".to_string())?;
 
     Ok(session.shared_files.clone())
+}
+
+// ============================================================================
+// 内部辅助函数：共享文件列表转换
+// ============================================================================
+
+/// 将共享文件列表转换为客户端视图（隐藏主机端文件路径）。
+///
+/// 主机端在向客户端广播 `SharedFileListUpdate` 消息时调用此函数：
+/// - 清除每个文件的 `path` 字段（避免客户端获取到主机端的文件系统路径）
+/// - 将 `is_local` 标记为 `false`（提示前端该文件是远端共享的，保存时需另存为）
+///
+/// 主机端自己调用 `get_shared_files` 时不受影响——返回的仍是完整的主机端视图。
+///
+/// # 参数
+/// - `files`: 主机端的共享文件列表引用
+///
+/// # 返回
+/// 转换后的客户端视图文件列表（`path` 为空字符串，`is_local` 为 `false`）
+fn to_client_shared_files(files: &[SharedFileInfo]) -> Vec<SharedFileInfo> {
+    files
+        .iter()
+        .map(|f| SharedFileInfo {
+            // 客户端不应获取到主机端的文件路径
+            path: String::new(),
+            title: f.title.clone(),
+            content: f.content.clone(),
+            // 标记为远端共享文件，前端应将其视为"非本地"文件
+            is_local: false,
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -1502,6 +1536,7 @@ async fn handle_connection(
     }
 
     // 广播共享文件列表给所有客户端（包括新加入的客户端）
+    // 注意：广播给客户端时需要转换为客户端视图，隐藏主机端文件路径
     {
         let session_guard = CURRENT_SESSION.lock().unwrap();
         let shared_files = if let Some(ref session) = *session_guard {
@@ -1510,7 +1545,7 @@ async fn handle_connection(
             Vec::new()
         };
         let shared_files_msg = CollaborationMessage::SharedFileListUpdate {
-            files: shared_files,
+            files: to_client_shared_files(&shared_files),
         };
         let shared_files_json = serialize_message(&shared_files_msg).unwrap_or_default();
         let clients = client_txs.lock().unwrap();

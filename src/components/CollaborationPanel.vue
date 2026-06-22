@@ -67,12 +67,18 @@ export interface CollabStatus {
 
 /** 共享文件信息 */
 export interface SharedFileInfo {
-  /** 文件完整路径 */
+  /** 文件完整路径（主机端为本机路径，客户端为空字符串） */
   path: string;
   /** 文件显示名称 */
   title: string;
   /** 文件内容 */
   content: string;
+  /**
+   * 是否为本地文件
+   * - `true`：主机端自己添加的共享文件，保存时直接写入原路径
+   * - `false`：来自其他主机的共享文件，保存时应提示"另存为"
+   */
+  is_local: boolean;
 }
 
 // ==================== Props 定义 ====================
@@ -840,9 +846,9 @@ function getUserInitial(username: string): string {
         <div v-if="sharedFiles.length > 0" class="collab-panel__file-list">
           <div
             v-for="file in sharedFiles"
-            :key="file.path"
+            :key="file.path || file.title"
             class="collab-panel__file-item"
-            :title="file.path"
+            :title="file.is_local ? file.path : `远端共享文件：${file.title}`"
             @click="emit('open-file', file)"
             @contextmenu="handleFileContextMenu($event, file)"
           >

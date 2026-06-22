@@ -349,7 +349,7 @@ watch(
       >
         <!-- 标签页标题：文件名 + 未保存标记 -->
         <span class="tab-title">
-          {{ getFileName(tab.path) || tab.title }}
+          {{ tab.title || getFileName(tab.path) }}
           <span v-if="tab.isDirty" class="tab-dirty-mark">*</span>
         </span>
 
@@ -408,7 +408,7 @@ watch(
           @click.stop="selectOverflowedTab(tab.id)"
         >
           <span class="overflow-dropdown-title">
-            {{ getFileName(tab.path) || tab.title }}
+            {{ tab.title || getFileName(tab.path) }}
             <span v-if="tab.isDirty" class="tab-dirty-mark">*</span>
           </span>
         </div>

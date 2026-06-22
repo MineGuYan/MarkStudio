@@ -940,23 +940,35 @@ async function handleSidebarOpenFile(path: string): Promise<void> {
  * 与普通文件打开不同，协作共享文件使用已经通过协作同步过来的内容创建标签页，
  * 而不是尝试从本地文件系统读取（因为客户端本地不存在主机端的文件路径）。
  *
- * @param file - 共享文件信息（包含路径、标题和已同步的内容）
+ * 关键差异：
+ * - 主机端（`is_local = true`）：使用主机端实际路径创建标签页，保存时直接写入原文件
+ * - 客户端（`is_local = false`）：使用空路径创建标签页，保存时自动触发"另存为"对话框
+ *   （与新建文档的保存行为一致），避免覆盖主机端文件或写入无效路径
+ *
+ * @param file - 共享文件信息（包含路径、标题、已同步的内容和 is_local 标记）
  */
 function handleCollabOpenFile(file: SharedFileInfo): void {
-  const { path, title, content } = file;
+  const { path, title, content, is_local } = file;
 
-  // 检查文件是否已在标签页中打开（通过路径匹配）
-  const existingTab = tabs.value.find((t) => t.path === path);
+  // 检查文件是否已在标签页中打开
+  // 主机端通过路径匹配（路径唯一）
+  // 客户端通过标题+空路径匹配（因为客户端没有真实路径）
+  const existingTab = is_local
+    ? tabs.value.find((t) => t.path === path)
+    : tabs.value.find((t) => t.path === "" && t.title === title);
+
   if (existingTab) {
     activeTabId.value = existingTab.id;
     return;
   }
 
-  // 使用已同步的内容创建新标签页
+  // 创建新标签页
+  // 主机端：使用真实路径，保存时直接覆盖原文件
+  // 客户端：使用空路径，保存时由 App.vue 的 saveFile 逻辑自动走"另存为"流程
   const newTab: TabInfo = {
     id: nextTabId++,
-    path,
-    title: getFileName(path) || title,
+    path: is_local ? path : "",
+    title: title || getFileName(path),
     content,
     lastSavedContent: content,
     isDirty: false,

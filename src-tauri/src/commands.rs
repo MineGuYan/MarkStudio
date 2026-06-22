@@ -290,6 +290,12 @@ pub fn get_collab_status() -> Result<String, String> {
                 "local_peer_id": s.local_peer_id,
                 "local_username": s.local_username,
                 "document": s.document,
+                "current_document_path": s.current_document_path,
+                "shared_files": s.shared_files.iter().map(|f| serde_json::json!({
+                    "path": f.path,
+                    "title": f.title,
+                    "content": f.content,
+                })).collect::<Vec<_>>(),
                 "disconnect_reason": null,
             });
             Ok(status.to_string())
@@ -641,4 +647,182 @@ pub fn compute_line_position_cmd(content: String, line_number: usize) -> usize {
 pub fn load_all_settings_cmd() -> Result<String, String> {
     let settings = crate::services::settings_service::load_all_settings()?;
     serde_json::to_string(&settings).map_err(|e| format!("设置序列化失败: {}", e))
+}
+
+// ==================== 收藏夹命令 ====================
+
+/// 获取收藏夹完整目录树
+///
+/// 递归获取所有目录和其中的文件列表，构建树形结构返回。
+///
+/// # 返回
+/// 收藏夹目录树的 JSON 字符串
+#[tauri::command]
+pub fn get_favorite_tree() -> Result<String, String> {
+    let tree = crate::database::get_favorite_tree()?;
+    serde_json::to_string(&tree).map_err(|e| format!("收藏夹目录树序列化失败: {}", e))
+}
+
+/// 创建收藏夹目录
+///
+/// # 参数
+/// - `name`: 目录名称
+/// - `parent_id`: 父目录 ID（可选，为空表示根目录）
+///
+/// # 返回
+/// 新创建目录的 ID
+#[tauri::command]
+pub fn create_favorite_dir(name: String, parent_id: Option<i64>) -> Result<i64, String> {
+    crate::database::create_favorite_dir(&name, parent_id)
+}
+
+/// 删除收藏夹目录（级联删除子目录和文件）
+///
+/// # 参数
+/// - `id`: 要删除的目录 ID
+///
+/// # 返回
+/// 成功返回 Ok(())
+#[tauri::command]
+pub fn delete_favorite_dir(id: i64) -> Result<(), String> {
+    crate::database::delete_favorite_dir(id)
+}
+
+/// 重命名收藏夹目录
+///
+/// # 参数
+/// - `id`: 目录 ID
+/// - `name`: 新名称
+///
+/// # 返回
+/// 成功返回 Ok(())
+#[tauri::command]
+pub fn rename_favorite_dir(id: i64, name: String) -> Result<(), String> {
+    crate::database::rename_favorite_dir(id, &name)
+}
+
+/// 添加文件到收藏夹目录
+///
+/// # 参数
+/// - `path`: 文件路径
+/// - `dir_id`: 目标目录 ID
+///
+/// # 返回
+/// 新创建收藏文件记录的 ID
+#[tauri::command]
+pub fn add_favorite_file(path: String, dir_id: i64) -> Result<i64, String> {
+    crate::database::add_favorite_file(&path, dir_id)
+}
+
+/// 从收藏夹移除文件
+///
+/// # 参数
+/// - `id`: 收藏文件记录 ID
+///
+/// # 返回
+/// 成功返回 Ok(())
+#[tauri::command]
+pub fn remove_favorite_file(id: i64) -> Result<(), String> {
+    crate::database::remove_favorite_file(id)
+}
+
+// ==================== 标签页管理命令 ====================
+
+/// 保存当前打开的标签页信息
+///
+/// 在应用关闭时调用，保存所有标签页信息到数据库，
+/// 以便下次启动时恢复。
+///
+/// # 参数
+/// - `tabs_json`: 标签页信息的 JSON 字符串
+/// - `active_index`: 当前激活的标签页索引
+///
+/// # 返回
+/// 成功返回 Ok(())
+#[tauri::command]
+pub fn save_open_tabs(tabs_json: String, active_index: usize) -> Result<(), String> {
+    crate::database::save_open_tabs(&tabs_json, active_index)
+}
+
+/// 获取上次打开的标签页信息
+///
+/// 在应用启动时调用，读取上次保存的标签页信息。
+///
+/// # 返回
+/// 标签页信息的 JSON 字符串
+#[tauri::command]
+pub fn get_open_tabs() -> Result<String, String> {
+    crate::database::get_open_tabs()
+}
+
+// ==================== 最近文件命令 ====================
+
+/// 从最近文件列表中移除指定路径的记录
+///
+/// # 参数
+/// - `path`: 要移除的文件路径
+///
+/// # 返回
+/// 成功返回 Ok(())
+#[tauri::command]
+pub fn remove_recent_file(path: String) -> Result<(), String> {
+    crate::database::remove_recent_file(&path)
+}
+
+// ==================== 文件检查命令 ====================
+
+/// 检查文件是否存在
+///
+/// # 参数
+/// - `path`: 文件路径
+///
+/// # 返回
+/// 文件是否存在
+#[tauri::command]
+pub fn check_file_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
+// ==================== 协作共享文件命令 ====================
+
+/// 添加共享文件到协作房间
+///
+/// 仅主机可调用此命令。将文件添加到共享文件列表，
+/// 并广播更新给所有客户端。
+///
+/// # 参数
+/// - `path`: 文件完整路径
+/// - `title`: 文件显示名称
+/// - `content`: 文件内容
+///
+/// # 返回
+/// 成功返回 Ok(())
+#[tauri::command]
+pub fn add_shared_file(path: String, title: String, content: String) -> Result<(), String> {
+    crate::collaboration::session::add_shared_file(&path, &title, &content)
+}
+
+/// 从协作房间移除共享文件
+///
+/// 仅主机可调用此命令。从共享文件列表中移除指定文件，
+/// 并广播更新给所有客户端。
+///
+/// # 参数
+/// - `path`: 要移除的文件路径
+///
+/// # 返回
+/// 成功返回 Ok(())
+#[tauri::command]
+pub fn remove_shared_file(path: String) -> Result<(), String> {
+    crate::collaboration::session::remove_shared_file(&path)
+}
+
+/// 获取当前协作房间的共享文件列表
+///
+/// # 返回
+/// 共享文件列表的 JSON 字符串
+#[tauri::command]
+pub fn get_shared_files() -> Result<String, String> {
+    let files = crate::collaboration::session::get_shared_files()?;
+    serde_json::to_string(&files).map_err(|e| format!("共享文件列表序列化失败: {}", e))
 }

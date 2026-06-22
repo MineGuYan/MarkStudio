@@ -25,6 +25,8 @@ pub fn get_default_settings() -> HashMap<String, String> {
         "image_cache_dir".to_string(),
         DEFAULT_IMAGE_CACHE_DIR.to_string(),
     );
+    // 启动时恢复标签页：默认关闭（"false"）
+    defaults.insert("restore_tabs_on_startup".to_string(), "false".to_string());
     defaults
 }
 
@@ -140,6 +142,10 @@ mod tests {
         assert!(
             settings.contains_key("image_cache_dir"),
             "缺少 'image_cache_dir' 键"
+        );
+        assert!(
+            settings.contains_key("restore_tabs_on_startup"),
+            "缺少 'restore_tabs_on_startup' 键"
         );
 
         // 验证所有值均为非空字符串

@@ -32,6 +32,10 @@ pub enum AppError {
     BusinessError(String),
     /// 输入验证错误
     ValidationError(String),
+    /// 收藏夹相关错误
+    FavoriteError(String),
+    /// 标签页管理相关错误
+    TabError(String),
 }
 
 impl fmt::Display for AppError {
@@ -46,6 +50,8 @@ impl fmt::Display for AppError {
             AppError::SettingsError(msg) => write!(f, "设置错误: {}", msg),
             AppError::BusinessError(msg) => write!(f, "业务错误: {}", msg),
             AppError::ValidationError(msg) => write!(f, "验证错误: {}", msg),
+            AppError::FavoriteError(msg) => write!(f, "收藏夹错误: {}", msg),
+            AppError::TabError(msg) => write!(f, "标签页错误: {}", msg),
         }
     }
 }

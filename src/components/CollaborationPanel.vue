@@ -10,7 +10,7 @@
  * - 连接状态指示器
  */
 
-import { ref, reactive, onUnmounted } from "vue";
+import { ref, reactive, computed, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 // ==================== 类型定义 ====================
@@ -57,8 +57,22 @@ export interface CollabStatus {
   local_username: string;
   /** 共享文档内容 */
   document: string;
+  /** 当前协作编辑的文档对应的共享文件路径 */
+  current_document_path: string | null;
+  /** 共享文件列表 */
+  shared_files: SharedFileInfo[];
   /** 断开连接原因（当 connected 为 false 时，可能包含原因说明） */
   disconnect_reason: string | null;
+}
+
+/** 共享文件信息 */
+export interface SharedFileInfo {
+  /** 文件完整路径 */
+  path: string;
+  /** 文件显示名称 */
+  title: string;
+  /** 文件内容 */
+  content: string;
 }
 
 // ==================== Props 定义 ====================
@@ -66,6 +80,10 @@ export interface CollabStatus {
 /** 当前编辑器中的文档内容，创建房间时作为初始文档同步给加入者 */
 const props = defineProps<{
   currentDocument?: string;
+  /** 当前打开的标签页列表（用于创建房间时选择共享文件） */
+  tabs?: { id: number; path: string; title: string; content: string }[];
+  /** 当前活跃标签页的 ID */
+  activeTabId?: number;
 }>();
 
 // ==================== Emits 定义 ====================
@@ -75,10 +93,12 @@ const emit = defineEmits<{
   "connection-change": [connected: boolean];
   /** 协作者列表更新 */
   "peers-update": [peers: PeerInfo[]];
-  /** 远程文档内容更新 */
-  "document-update": [document: string];
+  /** 远程文档内容更新（包含文档内容和对应路径） */
+  "document-update": [update: { document: string; path: string | null }];
   /** 本地对等方 ID 更新（用于过滤自己的光标） */
   "local-peer-id": [peerId: string];
+  /** 从共享文件列表打开文件 */
+  "open-file": [path: string];
 }>();
 
 // ==================== 状态管理 ====================
@@ -112,6 +132,19 @@ const successMessage = ref("");
 /** 复制反馈文本（为空时不显示） */
 const copiedLabel = ref("");
 
+/** 共享文件列表 */
+const sharedFiles = ref<SharedFileInfo[]>([]);
+
+/** 共享文件右键菜单是否可见 */
+const fileMenuVisible = ref(false);
+
+/** 共享文件右键菜单位置 */
+const fileMenuX = ref(0);
+const fileMenuY = ref(0);
+
+/** 当前右键菜单对应的文件 */
+const fileMenuTarget = ref<SharedFileInfo | null>(null);
+
 /** 状态轮询定时器 ID（用于清除定时器） */
 let statusPollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -135,6 +168,22 @@ const showCreateDialog = ref(false);
 
 /** 是否显示加入房间对话框 */
 const showJoinDialog = ref(false);
+
+/** 是否显示添加共享文件对话框 */
+const showAddSharedDialog = ref(false);
+
+/** 创建房间时选中的标签页 ID 集合 */
+const selectedTabIds = ref<Set<number>>(new Set());
+
+/** 添加共享文件时选中的标签页 ID 列表 */
+const addSharedSelectedIds = ref<number[]>([]);
+
+/** 未共享的标签页列表（计算属性：排除已在共享列表中的标签页） */
+const unsharedTabs = computed(() => {
+  if (!props.tabs) return [];
+  const sharedPaths = new Set(sharedFiles.value.map((f) => f.path));
+  return props.tabs.filter((t) => t.path && !sharedPaths.has(t.path));
+});
 
 // ==================== 创建房间表单 ====================
 
@@ -163,6 +212,100 @@ const joinForm = reactive({
 const joinLoading = ref(false);
 
 // ==================== 方法 ====================
+
+/**
+ * 切换标签页选择状态（创建房间对话框中的多选）
+ *
+ * @param tabId - 标签页 ID
+ */
+function toggleTabSelection(tabId: number): void {
+  const newSet = new Set(selectedTabIds.value);
+  if (newSet.has(tabId)) {
+    newSet.delete(tabId);
+  } else {
+    newSet.add(tabId);
+  }
+  selectedTabIds.value = newSet;
+}
+
+/**
+ * 添加选中的标签页到共享文件列表
+ * 调用后端 add_shared_file 命令逐个添加
+ */
+async function handleAddSharedFiles(): Promise<void> {
+  if (!props.tabs) return;
+
+  for (const tabId of addSharedSelectedIds.value) {
+    const tab = props.tabs.find((t) => t.id === tabId);
+    if (!tab) continue;
+
+    try {
+      await invoke("add_shared_file", {
+        path: tab.path,
+        title: tab.title,
+        content: tab.content,
+      });
+    } catch (error) {
+      console.error("添加共享文件失败:", error);
+    }
+  }
+
+  // 刷新共享文件列表
+  try {
+    const filesJson = await invoke<string>("get_shared_files");
+    sharedFiles.value = JSON.parse(filesJson);
+  } catch (error) {
+    console.error("获取共享文件列表失败:", error);
+  }
+
+  showAddSharedDialog.value = false;
+  addSharedSelectedIds.value = [];
+}
+
+/**
+ * 从共享文件列表中移除指定文件
+ *
+ * @param path - 文件路径
+ */
+async function handleRemoveSharedFile(path: string): Promise<void> {
+  try {
+    await invoke("remove_shared_file", { path });
+    // 刷新本地共享文件列表
+    sharedFiles.value = sharedFiles.value.filter((f) => f.path !== path);
+  } catch (error) {
+    console.error("移除共享文件失败:", error);
+  }
+}
+
+/**
+ * 处理共享文件右键菜单
+ *
+ * @param event - 鼠标事件
+ * @param file - 被右键点击的共享文件
+ */
+function handleFileContextMenu(event: MouseEvent, file: SharedFileInfo): void {
+  event.preventDefault();
+  fileMenuTarget.value = file;
+  fileMenuX.value = event.clientX;
+  fileMenuY.value = event.clientY;
+  fileMenuVisible.value = true;
+}
+
+/** 关闭共享文件右键菜单 */
+function closeFileMenu(): void {
+  fileMenuVisible.value = false;
+  fileMenuTarget.value = null;
+}
+
+/**
+ * 处理右键菜单的"移除共享"操作
+ */
+async function handleRemoveSharedFromMenu(): Promise<void> {
+  const file = fileMenuTarget.value;
+  if (!file) return;
+  closeFileMenu();
+  await handleRemoveSharedFile(file.path);
+}
 
 /**
  * 显示成功消息，3 秒后自动清除
@@ -213,6 +356,24 @@ async function handleCreateRoom(): Promise<void> {
     isHost.value = true;
     localUsername.value = trimmedUsername;
     connectionStatus.value = "connected";
+
+    // 添加选中的共享文件
+    if (props.tabs && selectedTabIds.value.size > 0) {
+      for (const tabId of selectedTabIds.value) {
+        const tab = props.tabs.find((t) => t.id === tabId);
+        if (tab && tab.path) {
+          try {
+            await invoke("add_shared_file", {
+              path: tab.path,
+              title: tab.title,
+              content: tab.content,
+            });
+          } catch (e) {
+            console.error("添加共享文件失败:", tab.path, e);
+          }
+        }
+      }
+    }
 
     // 关闭对话框
     showCreateDialog.value = false;
@@ -319,6 +480,7 @@ async function handleLeaveRoom(): Promise<void> {
   isHost.value = false;
   localUsername.value = "";
   localPeerId.value = "";
+  sharedFiles.value = [];
 
   // 通知父组件断开连接
   emit("connection-change", false);
@@ -379,7 +541,16 @@ function startStatusPolling(): void {
       // 仅当文档内容实际变化时，才通知父组件文档更新
       if (status.document !== lastDocument) {
         lastDocument = status.document;
-        emit("document-update", status.document);
+        // 传递文档内容和对应的路径，以便父组件找到对应标签页并更新
+        emit("document-update", {
+          document: status.document,
+          path: status.current_document_path,
+        });
+      }
+
+      // 更新共享文件列表
+      if (status.shared_files) {
+        sharedFiles.value = status.shared_files;
       }
     } catch (error) {
       console.error("协作状态轮询失败:", error);
@@ -401,6 +572,15 @@ function stopStatusPolling(): void {
   lastDocument = "";
 }
 
+// ==================== 组件生命周期 ====================
+
+/**
+ * 组件挂载时注册全局点击监听，用于关闭右键菜单
+ */
+onMounted(() => {
+  document.addEventListener("click", handleGlobalClick);
+});
+
 // ==================== 组件卸载清理 ====================
 
 /**
@@ -408,7 +588,23 @@ function stopStatusPolling(): void {
  */
 onUnmounted(() => {
   stopStatusPolling();
+  document.removeEventListener("click", handleGlobalClick);
 });
+
+/**
+ * 全局点击事件处理
+ * 点击右键菜单外部区域时关闭菜单
+ *
+ * @param event - 鼠标事件
+ */
+function handleGlobalClick(event: MouseEvent): void {
+  if (fileMenuVisible.value) {
+    const menu = document.querySelector(".collab-panel__file-menu");
+    if (menu && !menu.contains(event.target as Node)) {
+      closeFileMenu();
+    }
+  }
+}
 
 // ==================== 工具函数 ====================
 
@@ -632,6 +828,48 @@ function getUserInitial(username: string): string {
         </ul>
       </div>
 
+      <!-- 共享文件列表 -->
+      <div class="collab-panel__section">
+        <h4 class="collab-panel__section-title">
+          共享文件 ({{ sharedFiles.length }})
+        </h4>
+        <div v-if="sharedFiles.length > 0" class="collab-panel__file-list">
+          <div
+            v-for="file in sharedFiles"
+            :key="file.path"
+            class="collab-panel__file-item"
+            :title="file.path"
+            @click="emit('open-file', file.path)"
+            @contextmenu="handleFileContextMenu($event, file)"
+          >
+            <span class="collab-panel__file-icon">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                width="14"
+                height="14"
+              >
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+            </span>
+            <span class="collab-panel__file-name">{{ file.title }}</span>
+          </div>
+        </div>
+        <p v-else class="collab-panel__hint">暂无共享文件</p>
+        <!-- 添加共享文件按钮（仅主机可见） -->
+        <button
+          v-if="isHost"
+          class="collab-panel__btn collab-panel__btn--secondary"
+          style="margin-top: 8px;"
+          @click="showAddSharedDialog = true"
+        >
+          + 添加共享文件
+        </button>
+      </div>
+
       <!-- 离开按钮 -->
       <button
         class="collab-panel__btn collab-panel__btn--danger"
@@ -640,6 +878,22 @@ function getUserInitial(username: string): string {
         离开房间
       </button>
     </div>
+
+    <!-- 共享文件右键菜单 -->
+    <Teleport to="body">
+      <div
+        v-if="fileMenuVisible"
+        class="collab-panel__file-menu"
+        :style="{
+          left: fileMenuX + 'px',
+          top: fileMenuY + 'px',
+        }"
+      >
+        <div class="collab-panel__file-menu-item" @click="handleRemoveSharedFromMenu">
+          移除共享
+        </div>
+      </div>
+    </Teleport>
 
     <!-- ==================== 创建房间对话框 ==================== -->
     <Teleport to="body">
@@ -685,6 +939,24 @@ function getUserInitial(username: string): string {
                 placeholder="请输入您的用户名"
               />
             </label>
+            <!-- 选择共享标签页（多选） -->
+            <div v-if="tabs && tabs.length > 0" class="modal__label">
+              <span>选择要共享的标签页</span>
+              <div class="modal__tab-list">
+                <label
+                  v-for="tab in tabs"
+                  :key="tab.id"
+                  class="modal__tab-checkbox"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="selectedTabIds.has(tab.id)"
+                    @change="toggleTabSelection(tab.id)"
+                  />
+                  <span>{{ tab.title }}</span>
+                </label>
+              </div>
+            </div>
             <!-- 密码 -->
             <label class="modal__label">
               密码（可选）
@@ -803,6 +1075,64 @@ function getUserInitial(username: string): string {
               @click="handleJoinRoom"
             >
               {{ joinLoading ? "加入中..." : "加入房间" }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- ==================== 添加共享文件对话框 ==================== -->
+    <Teleport to="body">
+      <div v-if="showAddSharedDialog" class="modal-overlay" @mousedown.self="showAddSharedDialog = false">
+        <div class="modal">
+          <div class="modal__header">
+            <h3 class="modal__title">添加共享文件</h3>
+            <button
+              class="modal__close"
+              @click="showAddSharedDialog = false"
+              title="关闭"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+          <div class="modal__body">
+            <p class="collab-panel__hint" style="margin-bottom: 12px;">
+              选择要添加到共享列表的标签页（仅显示未共享的标签页）
+            </p>
+            <div class="modal__tab-list">
+              <label
+                v-for="tab in unsharedTabs"
+                :key="tab.id"
+                class="modal__tab-checkbox"
+              >
+                <input
+                  type="checkbox"
+                  :value="tab.id"
+                  v-model="addSharedSelectedIds"
+                />
+                <span>{{ tab.title }}</span>
+              </label>
+            </div>
+            <p v-if="unsharedTabs.length === 0" class="collab-panel__hint">
+              没有可添加的标签页
+            </p>
+          </div>
+          <div class="modal__footer">
+            <button
+              class="modal__btn modal__btn--cancel"
+              @click="showAddSharedDialog = false"
+            >
+              取消
+            </button>
+            <button
+              class="modal__btn modal__btn--primary"
+              :disabled="addSharedSelectedIds.length === 0"
+              @click="handleAddSharedFiles"
+            >
+              添加选中文件
             </button>
           </div>
         </div>
@@ -1557,5 +1887,137 @@ function getUserInitial(username: string): string {
 
 .modal__btn--primary:hover {
   opacity: 0.9;
+}
+
+/* ==================== 共享文件列表样式 ==================== */
+
+.collab-panel__file-list {
+  /* 撑满剩余空间 */
+  flex: 1;
+
+  /* 支持内容溢出时滚动 */
+  overflow-y: auto;
+
+  /* 上下内边距 */
+  padding: 4px 0;
+
+  /* 布局 */
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* 滚动条样式 */
+.collab-panel__file-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.collab-panel__file-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.collab-panel__file-list::-webkit-scrollbar-thumb {
+  background-color: var(--border-color);
+  border-radius: 3px;
+}
+
+/* 文件条目 */
+.collab-panel__file-item {
+  /* 条目布局 */
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  cursor: pointer;
+
+  /* 文字样式 */
+  font-size: 13px;
+  color: var(--text-color);
+  line-height: 1.6;
+
+  /* 过渡动画 */
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* 条目 hover 状态 */
+.collab-panel__file-item:hover {
+  background-color: var(--button-hover-bg);
+}
+
+/* 文件图标 */
+.collab-panel__file-icon {
+  /* 图标容器 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  /* 固定尺寸，保证对齐 */
+  width: 16px;
+  height: 16px;
+
+  /* 与文本之间的间距 */
+  margin-right: 6px;
+
+  /* 防止被 flex 压缩 */
+  flex-shrink: 0;
+
+  /* 颜色 */
+  color: var(--text-color);
+  opacity: 0.5;
+}
+
+/* 文件名 */
+.collab-panel__file-name {
+  /* 超长文本省略 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  /* 撑满剩余空间 */
+  flex: 1;
+}
+
+/* ==================== 共享文件右键菜单 ==================== */
+
+.collab-panel__file-menu {
+  /* 固定定位：跟随鼠标点击位置 */
+  position: fixed;
+
+  /* 尺寸 */
+  min-width: 120px;
+
+  /* 样式 */
+  background-color: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+
+  /* 层级 */
+  z-index: 300;
+
+  /* 间距 */
+  padding: 4px 0;
+}
+
+/* 菜单项 */
+.collab-panel__file-menu-item {
+  /* 布局 */
+  display: flex;
+  align-items: center;
+
+  /* 尺寸 */
+  padding: 8px 16px;
+
+  /* 样式 */
+  cursor: pointer;
+  color: var(--text-color);
+  font-size: 13px;
+  white-space: nowrap;
+
+  /* 过渡动画 */
+  transition: background-color 0.1s ease;
+}
+
+.collab-panel__file-menu-item:hover {
+  background-color: var(--button-hover-bg);
 }
 </style>

@@ -511,8 +511,8 @@ function resetSetting(key: string, defaultValue: string): void {
 .setting-toggle {
   position: relative;
   display: inline-block;
-  width: 44px;
-  height: 24px;
+  width: 48px;
+  height: 28px;
   cursor: pointer;
 }
 
@@ -526,8 +526,9 @@ function resetSetting(key: string, defaultValue: string): void {
   position: absolute;
   inset: 0;
   background-color: var(--border-color);
-  border-radius: 12px;
-  transition: background-color 0.2s ease;
+  border-radius: 14px;
+  transition: background-color 0.25s ease, box-shadow 0.25s ease;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 .setting-toggle__slider::before {
@@ -535,20 +536,22 @@ function resetSetting(key: string, defaultValue: string): void {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   background-color: white;
   border-radius: 50%;
-  transition: transform 0.2s ease;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2), 0 1px 2px rgba(0, 0, 0, 0.1);
 }
 
 .setting-toggle input:checked + .setting-toggle__slider {
   background-color: var(--button-active-bg);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2), inset 0 1px 1px rgba(255, 255, 255, 0.2);
 }
 
 .setting-toggle input:checked + .setting-toggle__slider::before {
   transform: translateX(20px);
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.4), 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
 /* ==================== 空状态 ==================== */

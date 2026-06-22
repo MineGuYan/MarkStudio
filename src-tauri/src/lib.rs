@@ -15,7 +15,8 @@ fn greet(name: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 应用启动时初始化数据库连接，确保数据目录和表结构就绪
-    database::get_connection();
+    // initialize_database 同时初始化主数据库和收藏夹数据库
+    database::initialize_database();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -47,6 +48,19 @@ pub fn run() {
             commands::check_dirty_cmd,
             commands::compute_line_position_cmd,
             commands::load_all_settings_cmd,
+            commands::get_favorite_tree,
+            commands::create_favorite_dir,
+            commands::delete_favorite_dir,
+            commands::rename_favorite_dir,
+            commands::add_favorite_file,
+            commands::remove_favorite_file,
+            commands::save_open_tabs,
+            commands::get_open_tabs,
+            commands::remove_recent_file,
+            commands::check_file_exists,
+            commands::add_shared_file,
+            commands::remove_shared_file,
+            commands::get_shared_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

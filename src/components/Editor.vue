@@ -512,6 +512,7 @@ defineExpose({
       :peers="collabPeers"
       :editor-content="modelValue ?? ''"
       :local-peer-id="localPeerId"
+      :textarea-ref="textareaRef"
     />
   </div>
 </template>

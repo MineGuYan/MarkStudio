@@ -118,6 +118,10 @@ pub enum CollaborationMessage {
     /// - `peers`: 当前在线的对等方信息列表
     PeerListUpdate { peers: Vec<PeerInfo> },
 
+    /// 共享文件列表更新（广播当前房间内共享的文件列表）
+    /// - `files`: 当前共享的文件信息列表
+    SharedFileListUpdate { files: Vec<SharedFileInfo> },
+
     /// 错误消息（用于传递错误信息）
     /// - `message`: 错误描述字符串
     Error { message: String },
@@ -141,6 +145,20 @@ pub struct PeerInfo {
     pub cursor_position: usize,
     /// 是否为房间主机（只有主机自身为 true，其余成员为 false）
     pub is_host: bool,
+}
+
+/// 共享文件信息，描述协作房间中共享的文件。
+///
+/// 在 `SharedFileListUpdate` 消息中使用，
+/// 用于向所有成员广播当前共享的文件列表。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedFileInfo {
+    /// 文件完整路径
+    pub path: String,
+    /// 文件显示名称（不含路径）
+    pub title: String,
+    /// 文件内容（用于初始同步）
+    pub content: String,
 }
 
 // ============================================================================

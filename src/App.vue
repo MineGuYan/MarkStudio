@@ -3,7 +3,8 @@
  * App.vue - 应用根组件
  *
  * 功能：
- * - 组合 Toolbar、Editor、Preview、SplitPane、Outline 子组件，构建完整应用布局
+ * - 组合 Toolbar、TabBar、Editor、Preview、SplitPane、Outline 子组件，构建完整应用布局
+ * - 支持多标签页管理：每个标签页拥有独立的文档内容、文件路径、脏状态、编辑模式、解析后的 HTML 和大纲
  * - 管理三种编辑模式：源代码（source）、预览（preview）、双屏（split）
  * - 管理主题（浅色 / 深色），通过 useTheme composable 实现
  * - 管理 Markdown 内容状态，并在预览/双屏模式下通过 Tauri IPC 解析为 HTML
@@ -11,22 +12,27 @@
  * - 通过 useShortcuts 注册快捷键：Ctrl+S 保存、Ctrl+F 查找
  * - 使用防抖优化 IPC 调用频率，避免频繁请求后端
  * - 集成协作编辑功能：管理协作面板、发送编辑操作和光标位置、轮询远程状态
+ * - 标签页恢复：启动时根据设置项决定是否恢复上次打开的标签页
+ * - 窗口关闭时保存所有打开的标签页信息
  */
 
-import { ref, watch, onMounted, onUnmounted } from "vue";
+import { ref, watch, computed, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // 导入子组件
 import Toolbar from "./components/Toolbar.vue";
+import TabBar from "./components/TabBar.vue";
 import Editor from "./components/Editor.vue";
 import Preview from "./components/Preview.vue";
 import SplitPane from "./components/SplitPane.vue";
-import Outline from "./components/Outline.vue";
+import SidebarTabs from "./components/SidebarTabs.vue";
 import CollaborationPanel from "./components/CollaborationPanel.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import CloseConfirmDialog from "./components/CloseConfirmDialog.vue";
+import TabSaveConfirmDialog from "./components/TabSaveConfirmDialog.vue";
+import FavoriteSelectDialog from "./components/FavoriteSelectDialog.vue";
 
 // 导入组合式函数
 import { useTheme } from "./composables/useTheme";
@@ -36,6 +42,33 @@ import { useShortcuts } from "./composables/useShortcuts";
 import type { OutlineItem } from "./components/Outline.vue";
 import type { Operation } from "./components/Editor.vue";
 import type { PeerInfo } from "./components/CursorOverlay.vue";
+
+// ==================== 类型定义 ====================
+
+/**
+ * 标签页信息接口
+ * 每个标签页独立维护自己的文档内容、路径、脏状态、编辑模式和解析结果
+ */
+interface TabInfo {
+  /** 标签页唯一标识 */
+  id: number;
+  /** 文件完整路径（新建文档为空字符串） */
+  path: string;
+  /** 标签页显示标题 */
+  title: string;
+  /** Markdown 源代码内容 */
+  content: string;
+  /** 最近一次保存时的文档内容，用于对比是否被修改 */
+  lastSavedContent: string;
+  /** 文档是否有未保存的修改 */
+  isDirty: boolean;
+  /** 当前编辑模式：source 为源代码编辑，preview 为预览，split 为双屏 */
+  mode: "source" | "preview" | "split";
+  /** Markdown 解析后的 HTML 字符串，用于预览渲染 */
+  parsedHtml: string;
+  /** 大纲条目列表 */
+  outline: OutlineItem[];
+}
 
 // ==================== 主题管理 ====================
 
@@ -59,31 +92,84 @@ watch(theme, async (newTheme) => {
 const { registerShortcut } = useShortcuts();
 
 /**
- * 注册 Ctrl+S 快捷键：保存文件
+ * 注册 Ctrl+S 快捷键：保存当前活跃标签页的文件
  * 如果已有文件路径则直接保存，否则弹出"另存为"对话框
  */
 registerShortcut("s", () => {
   saveFile();
 });
 
-// ==================== 编辑模式管理 ====================
+// ==================== 多标签页状态管理 ====================
 
-/** 当前编辑模式：source 为源代码编辑，preview 为预览，split 为双屏模式 */
-const mode = ref<"source" | "preview" | "split">("source");
+/** 所有打开的标签页数组 */
+const tabs = ref<TabInfo[]>([]);
 
-// ==================== Markdown 内容管理 ====================
+/** 当前活跃标签页的 ID，0 表示没有打开的标签页 */
+const activeTabId = ref<number>(0);
 
-/** Markdown 源代码内容 */
-const content = ref<string>("");
+/** 自增 ID 计数器，用于生成唯一的标签页 ID */
+let nextTabId = 1;
 
-/** 当前打开的文件路径，为空表示尚未保存过 */
-const currentFilePath = ref<string>("");
+/**
+ * 活跃标签页计算属性
+ * 根据 activeTabId 从 tabs 数组中查找对应的标签页
+ * 如果没有打开的标签页，返回 null
+ */
+const activeTab = computed<TabInfo | null>(
+  () => tabs.value.find((t) => t.id === activeTabId.value) || null
+);
 
-/** 文档是否已被修改（未保存） */
-const isDirty = ref<boolean>(false);
+/**
+ * 活跃标签页的解析后 HTML（用于预览组件绑定）
+ */
+const activeParsedHtml = computed(() => activeTab.value?.parsedHtml ?? "");
 
-/** 最近一次保存/打开时的文档内容，用于对比是否被修改 */
-let lastSavedContent: string = "";
+/**
+ * 活跃标签页的大纲数据（用于大纲面板绑定）
+ */
+const activeOutline = computed(() => activeTab.value?.outline ?? []);
+
+/**
+ * 活跃标签页的内容双向绑定计算属性
+ * 用于 Editor 组件的 v-model 绑定
+ */
+const activeContent = computed({
+  get: () => activeTab.value?.content ?? "",
+  set: (val: string) => {
+    if (activeTab.value) {
+      activeTab.value.content = val;
+    }
+  },
+});
+
+/**
+ * 活跃标签页的编辑模式（用于工具栏绑定）
+ */
+const activeMode = computed({
+  get: () => activeTab.value?.mode ?? "source",
+  set: (val: "source" | "preview" | "split") => {
+    if (activeTab.value) {
+      activeTab.value.mode = val;
+    }
+  },
+});
+
+// ==================== 工具函数 ====================
+
+/**
+ * 从完整文件路径中提取文件名
+ * 支持 Windows（\）和 Unix（/）路径分隔符
+ *
+ * @param path - 完整文件路径
+ * @returns 文件名
+ */
+function getFileName(path: string): string {
+  if (!path) return "新建文档";
+  const parts = path.replace(/\\/g, "/").split("/");
+  return parts[parts.length - 1] || "新建文档";
+}
+
+// ==================== 窗口关闭相关 ====================
 
 /** 窗口关闭事件监听器的取消函数 */
 let unlistenCloseRequested: (() => void) | null = null;
@@ -93,16 +179,21 @@ const closeConfirmRef = ref<InstanceType<typeof CloseConfirmDialog> | null>(
   null
 );
 
-/** Markdown 解析后的 HTML 字符串，用于预览渲染 */
-const parsedHtml = ref<string>("");
+/** 标签页保存确认对话框组件引用 */
+const tabSaveConfirmRef =
+  ref<InstanceType<typeof TabSaveConfirmDialog> | null>(null);
 
-/** 大纲条目列表，由 extract_outline IPC 获取 */
-const outline = ref<OutlineItem[]>([]);
+/** 收藏选择弹窗组件引用 */
+const favoriteSelectRef =
+  ref<InstanceType<typeof FavoriteSelectDialog> | null>(null);
 
-// ==================== 大纲面板折叠状态 ====================
+// ==================== 侧边栏状态 ====================
 
 /** 大纲面板是否折叠 */
 const outlineCollapsed = ref<boolean>(false);
+
+/** 侧边栏当前激活的选项卡：outline | recent | favorites */
+const sidebarActiveTab = ref<"outline" | "recent" | "favorites">("outline");
 
 // ==================== 协作状态 ====================
 
@@ -132,6 +223,9 @@ const settingsPanelVisible = ref<boolean>(false);
 /** 图片缓存目录路径（可在设置中更改） */
 const imageCacheDir = ref<string>("");
 
+/** 启动时是否恢复上次打开的标签页 */
+const restoreTabsOnStartup = ref<boolean>(false);
+
 /** 默认的图片缓存目录 */
 const DEFAULT_IMAGE_CACHE_DIR = "data/image_cache/";
 
@@ -156,14 +250,22 @@ const settingsCategories = ref([
         value: imageCacheDir.value,
         defaultValue: DEFAULT_IMAGE_CACHE_DIR,
       },
+      {
+        key: "restore_tabs_on_startup",
+        label: "启动时恢复标签页",
+        description:
+          "启动应用时自动恢复上次关闭前打开的所有标签页。",
+        type: "toggle" as const,
+        value: String(restoreTabsOnStartup.value),
+        defaultValue: "false",
+      },
     ],
   },
   {
     id: "editor",
     label: "编辑器",
     settings: [
-      // 未来可在此添加编辑器相关设置，例如：
-      // { key: "font_size", label: "字体大小", description: "...", type: "select", ... }
+      // 未来可在此添加编辑器相关设置
     ],
   },
 ]);
@@ -186,9 +288,11 @@ async function onSettingUpdate(key: string, value: string): Promise<void> {
     if (key === "image_cache_dir") {
       imageCacheDir.value = value;
     }
+    if (key === "restore_tabs_on_startup") {
+      restoreTabsOnStartup.value = value === "true";
+    }
 
     // 同步更新 settingsCategories 中对应设置项的 value
-    // 确保设置面板中显示的值与本地状态一致
     for (const category of settingsCategories.value) {
       const setting = category.settings.find((s) => s.key === key);
       if (setting) {
@@ -202,6 +306,8 @@ async function onSettingUpdate(key: string, value: string): Promise<void> {
 }
 
 // ==================== 防抖 IPC 调用 ====================
+
+/** Markdown 解析防抖定时器 ID */
 let parseDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** 大纲提取防抖定时器 ID */
@@ -212,90 +318,193 @@ const DEBOUNCE_DELAY = 300;
 
 /**
  * 带防抖的 Markdown 解析函数
- * 当内容变化时，延迟 DEBOUNCE_DELAY 毫秒后才调用 Tauri 后端解析
- * 避免用户快速输入时频繁发起 IPC 请求
+ * 当活跃标签页内容变化时，延迟 DEBOUNCE_DELAY 毫秒后才调用 Tauri 后端解析
+ * 通过捕获 tabId 防止切换标签页后的竞态条件
  *
  * @param markdown - 待解析的 Markdown 源代码
+ * @param tabId - 触发解析的标签页 ID
  */
-function debouncedParseMarkdown(markdown: string): void {
-  // 清除之前的定时器，重置防抖计时
+function debouncedParseMarkdown(markdown: string, tabId: number): void {
   if (parseDebounceTimer !== null) {
     clearTimeout(parseDebounceTimer);
   }
 
-  // 设置新的定时器
   parseDebounceTimer = setTimeout(async () => {
+    if (activeTabId.value !== tabId) return;
+
     try {
-      // 调用 Tauri 后端的 parse_markdown 命令，将 Markdown 解析为 HTML
-      parsedHtml.value = await invoke<string>("parse_markdown", {
-        markdown,
-      });
+      const html = await invoke<string>("parse_markdown", { markdown });
+      const tab = tabs.value.find((t) => t.id === tabId);
+      if (tab) {
+        tab.parsedHtml = html;
+      }
     } catch (error) {
       console.error("Markdown 解析失败:", error);
-      // 解析失败时显示错误提示
-      parsedHtml.value = `<p style="color: red;">Markdown 解析失败: ${error}</p>`;
+      const tab = tabs.value.find((t) => t.id === tabId);
+      if (tab) {
+        tab.parsedHtml = `<p style="color: red;">Markdown 解析失败: ${error}</p>`;
+      }
     }
   }, DEBOUNCE_DELAY);
 }
 
 /**
  * 带防抖的大纲提取函数
- * 当内容变化时，延迟 DEBOUNCE_DELAY 毫秒后才调用 Tauri 后端提取大纲
- * 避免用户快速输入时频繁发起 IPC 请求
+ * 当活跃标签页内容变化时，延迟 DEBOUNCE_DELAY 毫秒后才调用 Tauri 后端提取大纲
+ * 通过捕获 tabId 防止切换标签页后的竞态条件
  *
  * @param markdown - 待提取大纲的 Markdown 源代码
+ * @param tabId - 触发提取的标签页 ID
  */
-function debouncedExtractOutline(markdown: string): void {
-  // 清除之前的定时器，重置防抖计时
+function debouncedExtractOutline(markdown: string, tabId: number): void {
   if (outlineDebounceTimer !== null) {
     clearTimeout(outlineDebounceTimer);
   }
 
-  // 设置新的定时器
   outlineDebounceTimer = setTimeout(async () => {
+    if (activeTabId.value !== tabId) return;
+
     try {
-      // 调用 Tauri 后端的 extract_outline 命令，提取 Markdown 文档大纲
-      outline.value = await invoke<OutlineItem[]>("extract_outline", {
+      const items = await invoke<OutlineItem[]>("extract_outline", {
         markdown,
       });
+      const tab = tabs.value.find((t) => t.id === tabId);
+      if (tab) {
+        tab.outline = items;
+      }
     } catch (error) {
       console.error("大纲提取失败:", error);
-      // 提取失败时清空大纲列表
-      outline.value = [];
+      const tab = tabs.value.find((t) => t.id === tabId);
+      if (tab) {
+        tab.outline = [];
+      }
     }
   }, DEBOUNCE_DELAY);
 }
 
-// ==================== 文件操作 ====================
+// ==================== 标签页管理 ====================
 
 /**
- * 打开 Markdown 文件
- *
- * 使用 Tauri 原生文件打开对话框，支持 .md、.markdown、.txt 格式。
- * 用户选择文件后，通过 IPC 调用后端 read_file 命令读取文件内容，
- * 并将内容设置到编辑器中，同时记录当前文件路径。
+ * 创建新的空白标签页
+ * 标题为"新建文档"，内容为空，编辑模式为源代码
  */
+function newTab(): void {
+  const tab: TabInfo = {
+    id: nextTabId++,
+    path: "",
+    title: "新建文档",
+    content: "",
+    lastSavedContent: "",
+    isDirty: false,
+    mode: "source",
+    parsedHtml: "",
+    outline: [],
+  };
+  tabs.value.push(tab);
+  activeTabId.value = tab.id;
+}
+
+function selectTab(tabId: number): void {
+  activeTabId.value = tabId;
+}
+
+function removeTab(tabId: number): void {
+  const idx = tabs.value.findIndex((t) => t.id === tabId);
+  if (idx === -1) return;
+
+  tabs.value.splice(idx, 1);
+
+  if (activeTabId.value === tabId) {
+    if (tabs.value.length > 0) {
+      const newIdx = Math.min(idx, tabs.value.length - 1);
+      activeTabId.value = tabs.value[newIdx].id;
+    } else {
+      activeTabId.value = 0;
+    }
+  }
+}
+
+async function closeTab(tabId: number): Promise<void> {
+  const tab = tabs.value.find((t) => t.id === tabId);
+  if (!tab) return;
+
+  if (tab.isDirty) {
+    activeTabId.value = tabId;
+    const choice = await tabSaveConfirmRef.value!.show(tab.title);
+
+    if (choice === "save") {
+      await saveFile();
+      removeTab(tabId);
+    } else if (choice === "discard") {
+      removeTab(tabId);
+    }
+  } else {
+    removeTab(tabId);
+  }
+}
+
+async function closeAllTabs(): Promise<void> {
+  const dirtyTabs = tabs.value.filter((t) => t.isDirty);
+
+  for (const tab of dirtyTabs) {
+    activeTabId.value = tab.id;
+    const choice = await tabSaveConfirmRef.value!.show(tab.title);
+
+    if (choice === "save") {
+      await saveFile();
+    } else if (choice === "cancel") {
+      return;
+    }
+  }
+
+  tabs.value = [];
+  activeTabId.value = 0;
+}
+
+function closeUnmodifiedTabs(): void {
+  const unmodifiedIds = tabs.value
+    .filter((t) => !t.isDirty)
+    .map((t) => t.id);
+
+  for (const id of unmodifiedIds) {
+    removeTab(id);
+  }
+}
+
+// ==================== 文件操作 ====================
+
 async function openFile(): Promise<void> {
   try {
-    // 打开原生文件选择对话框，筛选 Markdown 相关文件
     const selected = await open({
       filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
       multiple: false,
     });
 
     if (selected) {
-      // Tauri v2 的 open 对话框返回文件路径字符串
-      const path = selected;
-      currentFilePath.value = path;
+      const path = selected as string;
 
-      // 调用后端 read_file 命令读取文件内容
-      content.value = await invoke<string>("read_file", { path });
+      const existingTab = tabs.value.find((t) => t.path === path);
+      if (existingTab) {
+        activeTabId.value = existingTab.id;
+        return;
+      }
 
-      // 重置脏状态，标记为已保存
-      lastSavedContent = content.value;
-      isDirty.value = false;
+      const fileContent = await invoke<string>("read_file", { path });
 
-      // 将文件路径记录到最近文件列表（SQLite 持久化）
+      const tab: TabInfo = {
+        id: nextTabId++,
+        path,
+        title: getFileName(path),
+        content: fileContent,
+        lastSavedContent: fileContent,
+        isDirty: false,
+        mode: "source",
+        parsedHtml: "",
+        outline: [],
+      };
+      tabs.value.push(tab);
+      activeTabId.value = tab.id;
+
       try {
         await invoke("add_recent_file", { path });
       } catch (e) {
@@ -308,25 +517,18 @@ async function openFile(): Promise<void> {
   }
 }
 
-/**
- * 保存文件
- *
- * 如果当前已有文件路径（即之前打开过或保存过），则直接写入该文件。
- * 否则调用 saveFileAs() 弹出"另存为"对话框。
- */
 async function saveFile(): Promise<void> {
+  if (!activeTab.value) return;
+
   try {
-    if (currentFilePath.value) {
-      // 已有路径，直接保存
+    if (activeTab.value.path) {
       await invoke("write_file", {
-        path: currentFilePath.value,
-        content: content.value,
+        path: activeTab.value.path,
+        content: activeTab.value.content,
       });
-      // 保存成功后重置脏状态
-      lastSavedContent = content.value;
-      isDirty.value = false;
+      activeTab.value.lastSavedContent = activeTab.value.content;
+      activeTab.value.isDirty = false;
     } else {
-      // 尚无路径，弹出"另存为"对话框
       await saveFileAs();
     }
   } catch (error) {
@@ -335,31 +537,26 @@ async function saveFile(): Promise<void> {
   }
 }
 
-/**
- * 文件另存为
- *
- * 使用 Tauri 原生文件保存对话框，让用户选择保存位置和文件名。
- * 保存成功后更新当前文件路径。
- */
 async function saveFileAs(): Promise<void> {
+  if (!activeTab.value) return;
+
   try {
-    // 打开原生文件保存对话框，默认扩展名为 .md
     const selected = await save({
       filters: [{ name: "Markdown", extensions: ["md"] }],
     });
 
     if (selected) {
-      currentFilePath.value = selected;
+      const path = selected as string;
 
-      // 调用后端 write_file 命令写入文件内容
       await invoke("write_file", {
-        path: selected,
-        content: content.value,
+        path,
+        content: activeTab.value.content,
       });
 
-      // 保存成功后重置脏状态
-      lastSavedContent = content.value;
-      isDirty.value = false;
+      activeTab.value.path = path;
+      activeTab.value.title = getFileName(path);
+      activeTab.value.lastSavedContent = activeTab.value.content;
+      activeTab.value.isDirty = false;
     }
   } catch (error) {
     console.error("另存为文件失败:", error);
@@ -369,61 +566,47 @@ async function saveFileAs(): Promise<void> {
 
 // ==================== 协作事件处理 ====================
 
-/**
- * 处理协作面板"连接状态变更"事件
- *
- * @param connected - 是否已连接
- */
 function onCollabConnectionChange(connected: boolean): void {
   collabConnected.value = connected;
-
   if (!connected) {
-    // 断开后清空协作者列表
     collabPeers.value = [];
   }
 }
 
-/**
- * 处理协作面板"协作者列表更新"事件
- *
- * @param peers - 协作者列表
- */
 function onCollabPeersUpdate(peers: PeerInfo[]): void {
   collabPeers.value = peers;
 }
 
-/**
- * 处理协作面板"本地对等方 ID 更新"事件
- * 用于 CursorOverlay 过滤掉自己的光标
- *
- * @param peerId - 本地对等方 ID
- */
 function onCollabLocalPeerId(peerId: string): void {
   localPeerId.value = peerId;
 }
 
-/**
- * 处理协作面板"文档更新"事件
- * 当远程文档内容变更时，更新本地编辑器内容
- *
- * @param document - 远程文档内容
- */
-function onCollabDocumentUpdate(document: string): void {
-  // 仅在文档内容确实变化时更新
-  if (document !== content.value) {
-    content.value = document;
+interface CollabDocumentUpdate {
+  document: string;
+  path: string | null;
+}
+
+function onCollabDocumentUpdate(update: CollabDocumentUpdate): void {
+  const { document, path } = update;
+
+  // 如果有路径信息，尝试找到对应路径的标签页并更新
+  if (path) {
+    const targetTab = tabs.value.find((t) => t.path === path);
+    if (targetTab && targetTab.content !== document) {
+      targetTab.content = document;
+      return;
+    }
+  }
+
+  // 如果没有找到对应路径的标签页，或没有路径信息，更新当前活动标签页
+  if (!activeTab.value) return;
+  if (document !== activeTab.value.content) {
+    activeTab.value.content = document;
   }
 }
 
-/**
- * 处理编辑器发出的本地编辑操作
- * 将 OT 操作序列化为 JSON 并通过 IPC 发送给后端
- *
- * @param op - OT 操作对象
- */
 async function onEditorOperation(op: Operation): Promise<void> {
   if (!collabConnected.value) return;
-
   try {
     const opJson = JSON.stringify(op);
     await invoke("send_collab_operation", { opJson });
@@ -432,15 +615,8 @@ async function onEditorOperation(op: Operation): Promise<void> {
   }
 }
 
-/**
- * 处理编辑器发出的光标位置变化
- * 将光标位置通过 IPC 发送给后端
- *
- * @param position - 光标字符偏移量
- */
 async function onEditorCursor(position: number): Promise<void> {
   if (!collabConnected.value) return;
-
   try {
     await invoke("send_collab_cursor", { position });
   } catch (error) {
@@ -450,71 +626,111 @@ async function onEditorCursor(position: number): Promise<void> {
 
 // ==================== 监听器 ====================
 
-/**
- * 监听 Markdown 内容变化和模式切换
- * 当处于预览模式或双屏模式时，触发防抖 Markdown 解析
- */
 watch(
-  () => ({ content: content.value, mode: mode.value }),
-  ({ content: newContent, mode: newMode }) => {
-    // 预览模式和双屏模式都需要解析 Markdown 为 HTML
-    if (newMode === "preview" || newMode === "split") {
-      debouncedParseMarkdown(newContent);
+  () => {
+    const tab = activeTab.value;
+    return {
+      content: tab?.content ?? "",
+      mode: tab?.mode ?? "source",
+      tabId: tab?.id ?? 0,
+    };
+  },
+  ({ content: newContent, mode: newMode, tabId }) => {
+    if ((newMode === "preview" || newMode === "split") && tabId > 0) {
+      debouncedParseMarkdown(newContent, tabId);
     }
   },
   { immediate: true }
 );
 
-/**
- * 监听 Markdown 内容变化，自动提取大纲
- */
 watch(
-  () => content.value,
-  (newContent) => {
-    debouncedExtractOutline(newContent);
+  () => {
+    const tab = activeTab.value;
+    return { content: tab?.content ?? "", tabId: tab?.id ?? 0 };
+  },
+  ({ content: newContent, tabId }) => {
+    if (tabId > 0) {
+      debouncedExtractOutline(newContent, tabId);
+    }
   },
   { immediate: true }
 );
 
-/**
- * 监听 Markdown 内容变化，通过后端 check_dirty_cmd 对比当前内容与保存时的内容
- * 判断文档是否已被修改（脏状态）
- */
 watch(
-  () => content.value,
-  async (newContent) => {
-    isDirty.value = await invoke("check_dirty_cmd", {
+  () => {
+    const tab = activeTab.value;
+    return { content: tab?.content ?? "", tabId: tab?.id ?? 0 };
+  },
+  async ({ content: newContent, tabId }) => {
+    if (tabId <= 0) return;
+    const tab = tabs.value.find((t) => t.id === tabId);
+    if (!tab) return;
+
+    tab.isDirty = await invoke("check_dirty_cmd", {
       current: newContent,
-      saved: lastSavedContent,
+      saved: tab.lastSavedContent,
     });
   }
 );
 
-// ==================== Ctrl+F 查找快捷键 ====================
-
-/**
- * Ctrl+F 查找快捷键处理函数
- * 聚焦编辑器文本域，让浏览器原生查找功能在编辑器内进行
- * 不阻止默认行为，确保浏览器原生 Ctrl+F 查找对话框能正常弹出
- *
- * @param e - 键盘事件对象
- */
 function handleCtrlF(e: KeyboardEvent): void {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
-    // 聚焦编辑器文本域，让浏览器查找在编辑器内进行
-    const textarea = document.querySelector<HTMLTextAreaElement>(".editor-textarea");
+    const textarea =
+      document.querySelector<HTMLTextAreaElement>(".editor-textarea");
     if (textarea) {
       textarea.focus();
     }
-    // 不阻止默认行为，让浏览器原生 Ctrl+F 查找对话框弹出
   }
 }
 
-// 在组件挂载时绑定 Ctrl+F 键盘事件，并加载持久化的主题偏好
+async function restoreTabs(): Promise<void> {
+  try {
+    const tabsJson: string = await invoke("get_open_tabs");
+    if (!tabsJson) return;
+
+    const savedTabs: Array<{
+      path: string;
+      title: string;
+      content: string;
+      isDirty: boolean;
+      mode: string;
+      active: boolean;
+    }> = JSON.parse(tabsJson);
+
+    if (!savedTabs || savedTabs.length === 0) return;
+
+    for (const savedTab of savedTabs) {
+      const tab: TabInfo = {
+        id: nextTabId++,
+        path: savedTab.path,
+        title: savedTab.title,
+        content: savedTab.content,
+        lastSavedContent: savedTab.isDirty ? "" : savedTab.content,
+        isDirty: savedTab.isDirty,
+        mode: savedTab.mode as "source" | "preview" | "split",
+        parsedHtml: "",
+        outline: [],
+      };
+      tabs.value.push(tab);
+
+      // 恢复激活的标签页
+      if (savedTab.active) {
+        activeTabId.value = tab.id;
+      }
+    }
+
+    // 如果没有标记为激活的标签页，默认激活第一个
+    if (tabs.value.length > 0 && activeTabId.value === 0) {
+      activeTabId.value = tabs.value[0].id;
+    }
+  } catch (e) {
+    console.error("恢复标签页失败:", e);
+  }
+}
+
 onMounted(async () => {
   document.addEventListener("keydown", handleCtrlF);
 
-  // 从后端批量加载所有持久化设置
   try {
     const settingsJson = await invoke<string>("load_all_settings_cmd");
     const settings = JSON.parse(settingsJson);
@@ -524,118 +740,203 @@ onMounted(async () => {
     if (settings.image_cache_dir) {
       imageCacheDir.value = settings.image_cache_dir;
     }
-    // 同步更新 settingsCategories 中对应设置项的 value
+    if (settings.restore_tabs_on_startup) {
+      restoreTabsOnStartup.value = settings.restore_tabs_on_startup === "true";
+    }
     const generalCategory = settingsCategories.value.find(
       (c) => c.id === "general"
     );
     if (generalCategory) {
-      const cacheSetting = generalCategory.settings.find(
-        (s) => s.key === "image_cache_dir"
-      );
-      if (cacheSetting) {
-        cacheSetting.value = imageCacheDir.value;
+      for (const setting of generalCategory.settings) {
+        if (setting.key === "image_cache_dir") {
+          setting.value = imageCacheDir.value;
+        } else if (setting.key === "restore_tabs_on_startup") {
+          setting.value = String(restoreTabsOnStartup.value);
+        }
       }
     }
   } catch (e) {
     console.error("加载设置失败:", e);
   }
 
-  // 注册窗口关闭事件拦截器：当文档未保存时弹出确认弹窗
+  if (restoreTabsOnStartup.value) {
+    await restoreTabs();
+  }
+
   unlistenCloseRequested = await getCurrentWindow().onCloseRequested(
     async (event) => {
-      // 如果文档没有被修改，直接允许关闭
-      if (!isDirty.value) {
+      const dirtyTabs = tabs.value.filter((t) => t.isDirty);
+
+      if (dirtyTabs.length === 0) {
+        await saveOpenTabsAndClose();
         return;
       }
 
-      // 阻止窗口立即关闭
       event.preventDefault();
 
-      // 弹出自定义确认对话框，提供三个选项：保存并关闭、不保存、取消
-      const choice = await closeConfirmRef.value!.show();
+      for (const tab of dirtyTabs) {
+        activeTabId.value = tab.id;
+        const choice = await tabSaveConfirmRef.value!.show(tab.title);
 
-      if (choice === "save") {
-        // 用户选择"保存并关闭"：先保存文件
-        try {
-          await saveFile();
-        } catch (e) {
-          console.error("关闭前自动保存失败:", e);
-          // 保存失败则不关闭，让用户手动处理
+        if (choice === "save") {
+          try {
+            await saveFile();
+          } catch (e) {
+            console.error("关闭前自动保存失败:", e);
+            return;
+          }
+        } else if (choice === "cancel") {
           return;
         }
-
-        // 保存成功后，取消关闭事件监听器，避免 onUnmounted 时重复清理
-        if (unlistenCloseRequested !== null) {
-          unlistenCloseRequested();
-          unlistenCloseRequested = null;
-        }
-
-        // 直接销毁窗口。destroy() 不经过 onCloseRequested 事件流程，
-        // 因此不会重入本回调，也无需 setTimeout 延迟。
-        // 注意：需要 capabilities 中配置 core:window:allow-destroy 权限。
-        await getCurrentWindow().destroy();
-      } else if (choice === "discard") {
-        // 用户选择"不保存"：放弃更改，直接关闭窗口
-        if (unlistenCloseRequested !== null) {
-          unlistenCloseRequested();
-          unlistenCloseRequested = null;
-        }
-
-        await getCurrentWindow().destroy();
       }
-      // choice === "cancel"：用户点击"取消"或关闭对话框，不关闭窗口
+
+      await saveOpenTabsAndClose();
     }
   );
 });
 
-// 在组件卸载时移除 Ctrl+F 键盘事件，防止内存泄漏
+async function saveOpenTabsAndClose(): Promise<void> {
+  try {
+    // 将标签页数据序列化为 JSON，供后端保存到数据库
+    const tabsData = tabs.value.map((t) => ({
+      path: t.path,
+      title: t.title,
+      content: t.content,
+      isDirty: t.isDirty,
+      mode: t.mode,
+    }));
+    const activeIndex = tabs.value.findIndex((t) => t.id === activeTabId.value);
+    await invoke("save_open_tabs", {
+      tabsJson: JSON.stringify(tabsData),
+      activeIndex: activeIndex >= 0 ? activeIndex : 0,
+    });
+  } catch (e) {
+    console.error("保存打开标签页信息失败:", e);
+  }
+
+  if (unlistenCloseRequested !== null) {
+    unlistenCloseRequested();
+    unlistenCloseRequested = null;
+  }
+
+  await getCurrentWindow().destroy();
+}
+
 onUnmounted(() => {
   document.removeEventListener("keydown", handleCtrlF);
-  // 取消窗口关闭事件监听
   if (unlistenCloseRequested !== null) {
     unlistenCloseRequested();
     unlistenCloseRequested = null;
   }
 });
 
-// ==================== 大纲导航处理 ====================
-
-/**
- * 处理大纲面板的导航事件
- * 当用户点击大纲条目时，将编辑器光标跳转到对应行
- *
- * @param line - 目标行号（从 1 开始）
- */
 async function onOutlineNavigate(line: number): Promise<void> {
-  // 通过后端计算目标行在文本中的字符起始位置
+  if (!activeTab.value) return;
+
   const charIndex: number = await invoke("compute_line_position_cmd", {
-    content: content.value,
+    content: activeTab.value.content,
     lineNumber: line,
   });
 
-  // 查找编辑器文本域
-  const textarea = document.querySelector<HTMLTextAreaElement>(".editor-textarea");
+  const textarea =
+    document.querySelector<HTMLTextAreaElement>(".editor-textarea");
   if (!textarea) return;
 
-  // 聚焦编辑器并将光标移动到目标位置
   textarea.focus();
   textarea.setSelectionRange(charIndex, charIndex);
 
-  // 滚动到目标行位置
   const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 24;
   textarea.scrollTop = (line - 1) * lineHeight;
 }
+
+// ==================== 侧边栏事件处理 ====================
+
+/**
+ * 处理最近访问或收藏夹中点击打开文件
+ * 如果文件已打开则切换到对应标签页，否则创建新标签页
+ */
+async function handleSidebarOpenFile(path: string): Promise<void> {
+  // 检查文件是否已打开
+  const existingTab = tabs.value.find((t) => t.path === path);
+  if (existingTab) {
+    activeTabId.value = existingTab.id;
+    return;
+  }
+
+  // 检查文件是否存在
+  const exists: boolean = await invoke("check_file_exists", { path });
+  if (!exists) {
+    const shouldRemove = confirm(
+      `文件不存在：\n${path}\n\n是否从列表中移除该项记录？`
+    );
+    if (shouldRemove) {
+      // 尝试从最近访问和收藏夹中移除（静默处理错误）
+      try {
+        await invoke("remove_recent_file", { path });
+      } catch { /* 忽略 */ }
+    }
+    return;
+  }
+
+  // 读取文件内容并创建新标签页
+  try {
+    const content = await invoke<string>("read_file", { path });
+    const newTab: TabInfo = {
+      id: nextTabId++,
+      path,
+      title: getFileName(path),
+      content,
+      lastSavedContent: content,
+      isDirty: false,
+      mode: "source",
+      parsedHtml: "",
+      outline: [],
+    };
+    tabs.value.push(newTab);
+    activeTabId.value = newTab.id;
+
+    // 触发解析和大纲提取
+    if (newTab.mode === "preview" || newTab.mode === "split") {
+      debouncedParseMarkdown(newTab.content, newTab.id);
+    }
+    debouncedExtractOutline(newTab.content, newTab.id);
+
+    // 记录到最近文件
+    try {
+      await invoke("add_recent_file", { path });
+    } catch { /* 忽略 */ }
+  } catch (error) {
+    console.error("打开文件失败:", error);
+    alert(`打开文件失败: ${error}`);
+  }
+}
+
+/**
+ * 处理最近访问中点击"收藏"后的操作
+ * 弹出收藏选择弹窗，用户选择目录后添加收藏
+ */
+async function handleAddFavorite(path: string): Promise<void> {
+  if (!favoriteSelectRef.value) return;
+  const dirId = await favoriteSelectRef.value.show();
+  if (dirId !== null && dirId !== undefined) {
+    try {
+      await invoke("add_favorite_file", { path, dirId });
+    } catch (error) {
+      console.error("添加收藏失败:", error);
+      alert(`添加收藏失败: ${error}`);
+    }
+  }
+}
+
 </script>
 
 <template>
-  <!-- 应用根容器，使用主题 CSS 变量控制背景色 -->
   <div class="app-container">
-    <!-- 顶部工具栏：模式切换 & 主题切换 & 文件操作 & 协作 & 设置 -->
     <Toolbar
-      :mode="mode"
+      :mode="activeMode"
       :theme="theme"
       :collab-connected="collabConnected"
-      @update:mode="(val: 'source' | 'preview' | 'split') => mode = val"
+      @update:mode="(val: 'source' | 'preview' | 'split') => activeMode = val"
       @update:theme="(val: 'light' | 'dark') => theme = val"
       @open-file="openFile"
       @save-file="saveFile"
@@ -643,23 +944,33 @@ async function onOutlineNavigate(line: number): Promise<void> {
       @toggle-settings="settingsPanelVisible = !settingsPanelVisible"
     />
 
-    <!-- 下方主体区域：横向 flex 布局 -->
+    <TabBar
+      :tabs="tabs"
+      :active-tab-id="activeTabId"
+      @select-tab="selectTab"
+      @close-tab="closeTab"
+      @new-tab="newTab"
+      @close-all-tabs="closeAllTabs"
+      @close-unmodified-tabs="closeUnmodifiedTabs"
+    />
+
     <div class="main-layout">
-      <!-- 左侧：大纲面板（可折叠） -->
       <div
         class="outline-wrapper"
         :class="{ 'outline-wrapper--collapsed': outlineCollapsed }"
       >
-        <Outline
+        <SidebarTabs
           v-if="!outlineCollapsed"
-          :outline="outline"
+          :active-tab="sidebarActiveTab"
+          :outline="activeOutline"
+          @update:active-tab="(val) => sidebarActiveTab = val as 'outline' | 'recent' | 'favorites'"
           @navigate="onOutlineNavigate"
+          @open-file="handleSidebarOpenFile"
+          @add-favorite="handleAddFavorite"
         />
       </div>
 
-      <!-- 大纲面板折叠/展开切换按钮 -->
       <div class="outline-toggle" @click="outlineCollapsed = !outlineCollapsed">
-        <!-- 折叠/展开箭头图标 -->
         <svg
           class="outline-toggle__icon"
           :class="{ 'outline-toggle__icon--collapsed': outlineCollapsed }"
@@ -672,61 +983,112 @@ async function onOutlineNavigate(line: number): Promise<void> {
         </svg>
       </div>
 
-      <!-- 右侧：主内容区域 -->
       <main class="main-content">
-        <!-- 源代码编辑模式：仅显示 Markdown 编辑器 -->
-        <Editor
-          v-if="mode === 'source'"
-          ref="sourceEditorRef"
-          v-model="content"
-          placeholder="请输入 Markdown 内容..."
-          :collab-enabled="collabConnected"
-          :collab-peers="collabPeers"
-          :local-peer-id="localPeerId"
-          :image-cache-dir="imageCacheDir"
-          @collab-operation="onEditorOperation"
-          @collab-cursor="onEditorCursor"
-        />
+        <div v-if="!activeTab" class="empty-state">
+          <div class="empty-state__icon">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              width="64"
+              height="64"
+            >
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
+              <polyline points="10 9 9 9 8 9" />
+            </svg>
+          </div>
+          <h2 class="empty-state__title">欢迎使用 MarkStudio</h2>
+          <p class="empty-state__desc">
+            点击上方"新建"按钮创建新文档，或点击"打开"按钮打开已有的 Markdown 文件
+          </p>
+          <div class="empty-state__actions">
+            <button class="empty-state__btn" @click="newTab">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                width="16"
+                height="16"
+              >
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              新建文档
+            </button>
+            <button class="empty-state__btn" @click="openFile">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                width="16"
+                height="16"
+              >
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+              打开文件
+            </button>
+          </div>
+        </div>
 
-        <!-- 预览模式：仅显示 Markdown 解析后的 HTML -->
-        <Preview
-          v-else-if="mode === 'preview'"
-          :html="parsedHtml"
-        />
+        <template v-if="activeTab">
+          <Editor
+            v-if="activeTab.mode === 'source'"
+            ref="sourceEditorRef"
+            v-model="activeContent"
+            placeholder="请输入 Markdown 内容..."
+            :collab-enabled="collabConnected"
+            :collab-peers="collabPeers"
+            :local-peer-id="localPeerId"
+            :image-cache-dir="imageCacheDir"
+            @collab-operation="onEditorOperation"
+            @collab-cursor="onEditorCursor"
+          />
 
-        <!-- 双屏模式：左侧编辑器 + 右侧预览 -->
-        <SplitPane v-else>
-          <template #left>
-            <Editor
-              ref="splitEditorRef"
-              v-model="content"
-              placeholder="请输入 Markdown 内容..."
-              :collab-enabled="collabConnected"
-              :collab-peers="collabPeers"
-              :local-peer-id="localPeerId"
-              :image-cache-dir="imageCacheDir"
-              @collab-operation="onEditorOperation"
-              @collab-cursor="onEditorCursor"
-            />
-          </template>
-          <template #right>
-            <Preview :html="parsedHtml" />
-          </template>
-        </SplitPane>
+          <Preview
+            v-else-if="activeTab.mode === 'preview'"
+            :html="activeParsedHtml"
+          />
+
+          <SplitPane v-else>
+            <template #left>
+              <Editor
+                ref="splitEditorRef"
+                v-model="activeContent"
+                placeholder="请输入 Markdown 内容..."
+                :collab-enabled="collabConnected"
+                :collab-peers="collabPeers"
+                :local-peer-id="localPeerId"
+                :image-cache-dir="imageCacheDir"
+                @collab-operation="onEditorOperation"
+                @collab-cursor="onEditorCursor"
+              />
+            </template>
+            <template #right>
+              <Preview :html="activeParsedHtml" />
+            </template>
+          </SplitPane>
+        </template>
       </main>
 
-      <!-- 右侧：协作面板（侧边栏形式） -->
       <CollaborationPanel
         v-show="collabPanelVisible"
-        :current-document="content"
+        :current-document="activeTab?.content ?? ''"
+        :tabs="tabs"
+        :active-tab-id="activeTabId"
         @connection-change="onCollabConnectionChange"
         @peers-update="onCollabPeersUpdate"
         @document-update="onCollabDocumentUpdate"
         @local-peer-id="onCollabLocalPeerId"
+        @open-file="handleSidebarOpenFile"
       />
     </div>
 
-    <!-- 设置面板覆盖层（覆盖主内容区域） -->
     <div v-if="settingsPanelVisible" class="settings-overlay">
       <div class="settings-overlay__header">
         <button
@@ -753,22 +1115,19 @@ async function onOutlineNavigate(line: number): Promise<void> {
       />
     </div>
 
-    <!-- 关闭确认对话框（由 onCloseRequested 触发） -->
     <CloseConfirmDialog ref="closeConfirmRef" />
+    <TabSaveConfirmDialog ref="tabSaveConfirmRef" />
+    <FavoriteSelectDialog ref="favoriteSelectRef" />
   </div>
 </template>
 
 <style>
-/* ==================== 全局重置样式 ==================== */
-
-/* 重置默认边距，确保应用填满整个窗口 */
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
-/* 页面根元素样式 */
 html,
 body,
 #app {
@@ -787,9 +1146,6 @@ body,
 </style>
 
 <style scoped>
-/* ==================== 应用布局样式 ==================== */
-
-/* 应用根容器：纵向 flex 布局，顶部工具栏 + 下方主内容区 */
 .app-container {
   display: flex;
   flex-direction: column;
@@ -800,9 +1156,6 @@ body,
   transition: background-color 0.3s ease;
 }
 
-/* ==================== 主体布局 ==================== */
-
-/* 主体区域：横向 flex 布局，左侧大纲面板 + 右侧主内容 */
 .main-layout {
   flex: 1;
   display: flex;
@@ -810,9 +1163,6 @@ body,
   overflow: hidden;
 }
 
-/* ==================== 大纲面板容器 ==================== */
-
-/* 大纲面板容器，支持折叠动画 */
 .outline-wrapper {
   width: 200px;
   min-width: 200px;
@@ -821,37 +1171,22 @@ body,
   transition: width 0.2s ease, min-width 0.2s ease;
 }
 
-/* 大纲面板折叠状态：宽度为 0 */
 .outline-wrapper--collapsed {
   width: 0;
   min-width: 0;
 }
 
-/* ==================== 大纲折叠按钮 ==================== */
-
-/* 大纲面板折叠/展开切换按钮 */
 .outline-toggle {
-  /* 布局 */
   display: flex;
   align-items: center;
   justify-content: center;
-
-  /* 尺寸 */
   width: 18px;
   height: 100%;
-
-  /* 样式 */
   cursor: pointer;
   background-color: var(--toolbar-bg-color);
   border-right: 1px solid var(--border-color);
-
-  /* 过渡动画 */
   transition: background-color 0.2s ease;
-
-  /* 防止文本被选中 */
   user-select: none;
-
-  /* 防止被 flex 压缩 */
   flex-shrink: 0;
 }
 
@@ -859,7 +1194,6 @@ body,
   background-color: var(--button-hover-bg);
 }
 
-/* 折叠/展开箭头图标 */
 .outline-toggle__icon {
   width: 12px;
   height: 12px;
@@ -867,26 +1201,80 @@ body,
   transition: transform 0.2s ease;
 }
 
-/* 折叠状态下的箭头方向翻转 */
 .outline-toggle__icon--collapsed {
   transform: rotate(180deg);
 }
 
-/* ==================== 主内容区域 ==================== */
-
-/* 主内容区域：撑满大纲面板右侧剩余空间 */
 .main-content {
   flex: 1;
   display: flex;
   overflow: hidden;
 }
 
-/* ==================== 设置面板覆盖层 ==================== */
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 40px;
+  color: var(--text-color);
+  opacity: 0.7;
+}
 
-/* 设置面板覆盖层：使用绝对定位覆盖主内容区域 */
+.empty-state__icon {
+  color: var(--text-color);
+  opacity: 0.4;
+  margin-bottom: 8px;
+}
+
+.empty-state__title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--heading-color);
+  opacity: 0.8;
+}
+
+.empty-state__desc {
+  font-size: 14px;
+  color: var(--text-color);
+  opacity: 0.5;
+  max-width: 360px;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.empty-state__actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.empty-state__btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--button-hover-bg);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-color);
+  transition: all 0.2s ease;
+}
+
+.empty-state__btn:hover {
+  background: var(--button-active-bg);
+  color: var(--button-active-text);
+  border-color: var(--button-active-bg);
+}
+
 .settings-overlay {
   position: absolute;
-  top: 48px; /* 工具栏高度 */
+  top: 84px;
   left: 0;
   right: 0;
   bottom: 0;
@@ -896,7 +1284,6 @@ body,
   background-color: var(--bg-color);
 }
 
-/* 设置面板顶部关闭按钮区域 */
 .settings-overlay__header {
   display: flex;
   justify-content: flex-end;
@@ -905,7 +1292,6 @@ body,
   border-bottom: 1px solid var(--border-color);
 }
 
-/* 关闭按钮 */
 .settings-overlay__close {
   display: flex;
   align-items: center;

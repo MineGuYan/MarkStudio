@@ -34,7 +34,9 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
-use super::network::{deserialize_message, serialize_message, CollaborationMessage, PeerInfo};
+use super::network::{
+    deserialize_message, serialize_message, CollaborationMessage, PeerInfo, SharedFileInfo,
+};
 use super::ot::{apply_operation, Operation};
 
 // ============================================================================
@@ -80,6 +82,8 @@ pub struct CollaborationSession {
     pub password: String,
     /// 当前文档内容
     pub document: String,
+    /// 当前协作编辑的文档对应的共享文件路径（用于前端关联标签页）
+    pub current_document_path: Option<String>,
     /// 是否为房间主机
     pub is_host: bool,
     /// 在线对等方列表
@@ -90,6 +94,8 @@ pub struct CollaborationSession {
     pub local_username: String,
     /// 连接状态
     pub connected: bool,
+    /// 共享文件列表（主机维护，用于多文件共享）
+    pub shared_files: Vec<SharedFileInfo>,
     /// 消息发送通道——用于向 WebSocket 写入待发送的消息文本（JSON 字符串）。
     /// 主机模式下，该通道连接到广播分发器；客户端模式下，直接连接到 WebSocket 写入任务。
     msg_tx: Option<mpsc::UnboundedSender<String>>,
@@ -261,11 +267,13 @@ pub async fn create_room(
         room_id: room_id.clone(),
         password: password.to_string(),
         document: document.to_string(),
+        current_document_path: None,
         is_host: true,
         peers: vec![host_peer],
         local_peer_id: local_peer_id.clone(),
         local_username: username.to_string(),
         connected: true,
+        shared_files: Vec::new(),
         msg_tx: Some(msg_tx),
         client_txs: Some(client_txs),
         accept_handle: Some(accept_handle),
@@ -385,11 +393,13 @@ pub async fn join_room(
                 room_id: room_id.to_string(),
                 password: password.to_string(),
                 document: document.clone(),
+                current_document_path: None,
                 is_host: false,
                 peers: Vec::new(), // 等收到 PeerListUpdate 后更新
                 local_peer_id: peer_id.clone(),
                 local_username: username.to_string(),
                 connected: true,
+                shared_files: Vec::new(),
                 msg_tx: Some(msg_tx),
                 client_txs: None, // 客户端不需要此字段
                 accept_handle: None,
@@ -569,6 +579,14 @@ pub async fn join_room(
                         // 图片同步结束——在分片处理中已自动检测完成，此处仅记录日志
                         CollaborationMessage::ImageSyncEnd { file_name, .. } => {
                             eprintln!("[MarkStudio] 收到图片同步结束通知: {}", file_name);
+                        }
+
+                        // 共享文件列表更新——更新本地共享文件列表
+                        CollaborationMessage::SharedFileListUpdate { files } => {
+                            let mut guard = CURRENT_SESSION.lock().unwrap();
+                            if let Some(ref mut session) = *guard {
+                                session.shared_files = files;
+                            }
                         }
 
                         // 心跳等消息无需处理
@@ -975,6 +993,130 @@ pub fn set_username(username: &str) -> Result<(), String> {
 }
 
 // ============================================================================
+// 共享文件管理函数
+// ============================================================================
+
+/// 添加共享文件到协作房间。
+///
+/// 仅主机可调用此函数。将文件信息添加到共享文件列表，
+/// 并广播更新给所有客户端。
+///
+/// # 参数
+/// - `path`: 文件完整路径
+/// - `title`: 文件显示名称
+/// - `content`: 文件内容
+///
+/// # 返回
+/// - `Ok(())`: 添加成功
+/// - `Err(String)`: 添加失败，返回错误描述
+pub fn add_shared_file(path: &str, title: &str, content: &str) -> Result<(), String> {
+    let mut session_guard = CURRENT_SESSION.lock().unwrap();
+    let session = session_guard
+        .as_mut()
+        .ok_or_else(|| "当前没有活跃的协作会话".to_string())?;
+
+    if !session.is_host {
+        return Err("只有主机可以添加共享文件".to_string());
+    }
+
+    // 检查是否已存在相同路径的共享文件
+    if session.shared_files.iter().any(|f| f.path == path) {
+        return Err(format!("文件 {} 已在共享列表中", path));
+    }
+
+    let file_info = SharedFileInfo {
+        path: path.to_string(),
+        title: title.to_string(),
+        content: content.to_string(),
+    };
+
+    // 如果是第一个共享文件，设置当前协作文档
+    let is_first = session.shared_files.is_empty();
+    session.shared_files.push(file_info);
+
+    if is_first {
+        // 第一个共享文件成为当前协作编辑的文档
+        session.current_document_path = Some(path.to_string());
+        session.document = content.to_string();
+    }
+
+    // 广播共享文件列表更新给所有客户端
+    let update_msg = CollaborationMessage::SharedFileListUpdate {
+        files: session.shared_files.clone(),
+    };
+    let update_json = serialize_message(&update_msg)?;
+
+    if let Some(ref client_txs) = session.client_txs {
+        let clients = client_txs.lock().unwrap();
+        for (_, tx) in clients.iter() {
+            let _ = tx.send(update_json.clone());
+        }
+    }
+
+    Ok(())
+}
+
+/// 从协作房间中移除共享文件。
+///
+/// 仅主机可调用此函数。从共享文件列表中移除指定文件，
+/// 并广播更新给所有客户端。
+///
+/// # 参数
+/// - `path`: 要移除的文件路径
+///
+/// # 返回
+/// - `Ok(())`: 移除成功
+/// - `Err(String)`: 移除失败，返回错误描述
+pub fn remove_shared_file(path: &str) -> Result<(), String> {
+    let mut session_guard = CURRENT_SESSION.lock().unwrap();
+    let session = session_guard
+        .as_mut()
+        .ok_or_else(|| "当前没有活跃的协作会话".to_string())?;
+
+    if !session.is_host {
+        return Err("只有主机可以移除共享文件".to_string());
+    }
+
+    let original_len = session.shared_files.len();
+    session.shared_files.retain(|f| f.path != path);
+
+    if session.shared_files.len() == original_len {
+        return Err(format!("未找到共享文件: {}", path));
+    }
+
+    // 广播共享文件列表更新给所有客户端
+    let update_msg = CollaborationMessage::SharedFileListUpdate {
+        files: session.shared_files.clone(),
+    };
+    let update_json = serialize_message(&update_msg)?;
+
+    if let Some(ref client_txs) = session.client_txs {
+        let clients = client_txs.lock().unwrap();
+        for (_, tx) in clients.iter() {
+            let _ = tx.send(update_json.clone());
+        }
+    }
+
+    Ok(())
+}
+
+/// 获取当前共享文件列表。
+///
+/// 任何人都可以调用此函数获取房间中的共享文件列表。
+///
+/// # 返回
+/// - `Ok(Vec<SharedFileInfo>)`: 共享文件列表
+/// - `Err(String)`: 获取失败，返回错误描述
+pub fn get_shared_files() -> Result<Vec<SharedFileInfo>, String> {
+    let session_guard = CURRENT_SESSION.lock().unwrap();
+    let session = session_guard
+        .as_ref()
+        .ok_or_else(|| "当前没有活跃的协作会话".to_string())?;
+
+    Ok(session.shared_files.clone())
+}
+
+// ============================================================================
 // 内部辅助函数：WebSocket 服务器接受循环
 // ============================================================================
 
@@ -1170,6 +1312,24 @@ async fn handle_connection(
         let peer_list_json = serialize_message(&peer_list_msg).unwrap_or_default();
         for (_, tx) in clients.iter() {
             let _ = tx.send(peer_list_json.clone());
+        }
+    }
+
+    // 广播共享文件列表给所有客户端（包括新加入的客户端）
+    {
+        let session_guard = CURRENT_SESSION.lock().unwrap();
+        let shared_files = if let Some(ref session) = *session_guard {
+            session.shared_files.clone()
+        } else {
+            Vec::new()
+        };
+        let shared_files_msg = CollaborationMessage::SharedFileListUpdate {
+            files: shared_files,
+        };
+        let shared_files_json = serialize_message(&shared_files_msg).unwrap_or_default();
+        let clients = client_txs.lock().unwrap();
+        for (_, tx) in clients.iter() {
+            let _ = tx.send(shared_files_json.clone());
         }
     }
 
@@ -1620,6 +1780,7 @@ mod tests {
                 local_peer_id: "test-peer".to_string(),
                 local_username: "tester".to_string(),
                 connected: true,
+                shared_files: Vec::new(),
                 msg_tx: None,
                 client_txs: None,
                 accept_handle: None,
@@ -1709,6 +1870,7 @@ mod tests {
                 local_peer_id: "peer-1".to_string(),
                 local_username: "test".to_string(),
                 connected: true,
+                shared_files: Vec::new(),
                 msg_tx: None,
                 client_txs: None,
                 accept_handle: None,
@@ -1762,6 +1924,7 @@ mod tests {
                 local_peer_id: "peer-1".to_string(),
                 local_username: "test".to_string(),
                 connected: true,
+                shared_files: Vec::new(),
                 msg_tx: None,
                 client_txs: None,
                 accept_handle: None,
@@ -1853,6 +2016,7 @@ mod tests {
                 local_peer_id: "peer-1".to_string(),
                 local_username: "test".to_string(),
                 connected: true,
+                shared_files: Vec::new(),
                 msg_tx: None,
                 client_txs: None,
                 accept_handle: None,
@@ -1927,6 +2091,7 @@ mod tests {
                 local_peer_id: "host-1".to_string(),
                 local_username: "host".to_string(),
                 connected: true,
+                shared_files: Vec::new(),
                 msg_tx: Some(_msg_tx),
                 client_txs: Some(client_txs),
                 accept_handle: None,
@@ -1989,6 +2154,7 @@ mod tests {
                 local_peer_id: "client-1".to_string(),
                 local_username: "client".to_string(),
                 connected: true,
+                shared_files: Vec::new(),
                 msg_tx: Some(msg_tx),
                 client_txs: None,
                 accept_handle: None,
@@ -2057,6 +2223,7 @@ mod tests {
                 local_peer_id: "client-1".to_string(),
                 local_username: "Alice".to_string(),
                 connected: true,
+                shared_files: Vec::new(),
                 msg_tx: Some(msg_tx),
                 client_txs: None,
                 accept_handle: None,

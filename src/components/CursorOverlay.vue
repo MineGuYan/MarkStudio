@@ -6,9 +6,10 @@
  * - 在编辑器 textarea 上方以绝对定位显示其他协作者的光标位置和用户名
  * - 每个协作者分配不同的颜色，便于区分
  * - 通过计算光标在文本内容中的偏移量来定位光标标签
+ * - 跟随编辑器滚动，确保光标始终显示在正确的文本位置
  */
 
-import { computed } from "vue";
+import { computed, ref, watch, onUnmounted } from "vue";
 
 // ==================== 类型定义 ====================
 
@@ -33,7 +34,49 @@ const props = defineProps<{
   editorContent: string;
   /** 本地对等方 ID，用于过滤掉自己的光标 */
   localPeerId?: string;
+  /** textarea 元素的 ref（可选，用于获取滚动位置） */
+  textareaRef?: HTMLElement | null;
 }>();
+
+// ==================== 滚动位置状态 ====================
+
+/** textarea 的垂直滚动位置 */
+const scrollTop = ref(0);
+
+/** textarea 的水平滚动位置 */
+const scrollLeft = ref(0);
+
+/**
+ * 更新滚动位置
+ * 根据当前光标在文档中的行号，计算实际可见的光标像素位置
+ */
+function updateScrollPosition(): void {
+  if (!props.textareaRef) return;
+
+  scrollTop.value = props.textareaRef.scrollTop;
+  scrollLeft.value = props.textareaRef.scrollLeft;
+}
+
+// 监听 props.textareaRef 的变化
+watch(
+  () => props.textareaRef,
+  (el) => {
+    if (el) {
+      // 初始化滚动位置
+      updateScrollPosition();
+      // 监听滚动事件
+      el.addEventListener("scroll", updateScrollPosition);
+    }
+  },
+  { immediate: true }
+);
+
+// 组件卸载时移除事件监听
+onUnmounted(() => {
+  if (props.textareaRef) {
+    props.textareaRef.removeEventListener("scroll", updateScrollPosition);
+  }
+});
 
 // ==================== 协作者颜色分配 ====================
 
@@ -132,11 +175,12 @@ const visibleCursors = computed(() => {
         props.editorContent,
         peer.cursor_position
       );
+      // 减去滚动偏移量，使光标跟随文本滚动
       return {
         ...peer,
         color: getPeerColor(peer.peer_id),
-        left: pos.left,
-        top: pos.top,
+        left: pos.left - scrollLeft.value,
+        top: pos.top - scrollTop.value,
       };
     });
 });

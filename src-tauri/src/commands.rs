@@ -784,6 +784,18 @@ pub fn check_file_exists(path: String) -> bool {
     std::path::Path::new(&path).exists()
 }
 
+/// 删除本地文件
+///
+/// # 参数
+/// - `path`: 要删除的文件路径
+///
+/// # 返回
+/// 成功返回 Ok(())，失败返回错误描述字符串
+#[tauri::command]
+pub fn delete_local_file(path: String) -> Result<(), String> {
+    std::fs::remove_file(&path).map_err(|e| format!("删除文件失败: {}", e))
+}
+
 // ==================== 协作共享文件命令 ====================
 
 /// 添加共享文件到协作房间

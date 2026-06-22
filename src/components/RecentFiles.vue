@@ -163,6 +163,49 @@ function handleAddFavorite(): void {
   closeContextMenu();
 }
 
+/**
+ * 处理右键菜单项"移除"
+ * 从数据库中移除该文件记录，但不删除本地文件
+ */
+async function handleRemove(): Promise<void> {
+  const path = contextMenuPath.value;
+  closeContextMenu();
+  const confirmed = confirm(`确定要从最近访问中移除文件 "${getFileName(path)}" 的记录吗？`);
+  if (!confirmed) return;
+  try {
+    await invoke("remove_recent_file", { path });
+    recentFiles.value = recentFiles.value.filter((f) => f !== path);
+  } catch (error) {
+    console.error("移除记录失败:", error);
+    // Tauri invoke 返回的错误可能是字符串或 Error 对象
+    const errMsg = typeof error === "string" ? error : (error as Error).message || String(error);
+    alert("移除记录失败: " + errMsg);
+  }
+}
+
+/**
+ * 处理右键菜单项"删除文件"
+ * 从数据库中移除记录，同时删除本地文件
+ */
+async function handleDeleteFile(): Promise<void> {
+  const path = contextMenuPath.value;
+  closeContextMenu();
+  const confirmed = confirm(
+    `确定要删除文件 "${getFileName(path)}" 吗？\n此操作将删除本地文件，无法撤销！`
+  );
+  if (!confirmed) return;
+  try {
+    await invoke("remove_recent_file", { path });
+    recentFiles.value = recentFiles.value.filter((f) => f !== path);
+    await invoke("delete_local_file", { path });
+  } catch (error) {
+    console.error("删除文件失败:", error);
+    // Tauri invoke 返回的错误可能是字符串或 Error 对象
+    const errMsg = typeof error === "string" ? error : (error as Error).message || String(error);
+    alert("删除文件失败: " + errMsg);
+  }
+}
+
 // ==================== 全局点击监听 ====================
 
 /**
@@ -258,6 +301,13 @@ defineExpose({
     >
       <div class="context-menu-item" @click="handleAddFavorite">
         收藏
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-item" @click="handleRemove">
+        移除
+      </div>
+      <div class="context-menu-item context-menu-item--danger" @click="handleDeleteFile">
+        删除文件
       </div>
     </div>
   </Teleport>
@@ -463,6 +513,20 @@ defineExpose({
 
 .context-menu-item:hover {
   background-color: var(--button-hover-bg);
+}
+
+.context-menu-item--danger {
+  color: #d32f2f;
+}
+
+.context-menu-item--danger:hover {
+  background-color: rgba(211, 47, 47, 0.1);
+}
+
+.context-menu-divider {
+  height: 1px;
+  background-color: var(--border-color);
+  margin: 4px 0;
 }
 
 /* ==================== 确认对话框样式 ==================== */

@@ -58,6 +58,7 @@ pub fn run() {
             commands::get_open_tabs,
             commands::remove_recent_file,
             commands::check_file_exists,
+            commands::delete_local_file,
             commands::add_shared_file,
             commands::remove_shared_file,
             commands::get_shared_files,

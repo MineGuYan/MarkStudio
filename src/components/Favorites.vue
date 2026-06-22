@@ -1,4 +1,4 @@
-﻿﻿﻿<script setup lang="ts">
+﻿﻿﻿﻿﻿﻿﻿<script setup lang="ts">
 /**
  * Favorites 组件 - 收藏夹面板
  *
@@ -361,11 +361,35 @@ async function handleRemoveFile(): Promise<void> {
   const file = contextMenuFile.value;
   if (!file) return;
   closeContextMenu();
+  const confirmed = confirm(`确定要从收藏夹中移除文件 "${getFileName(file.path)}" 吗？`);
+  if (!confirmed) return;
   try {
     await invoke("remove_favorite_file", { id: file.id });
     await loadTree();
   } catch (e) {
-    alert("移除文件失败: " + (e as Error).message);
+    // Tauri invoke 返回的错误可能是字符串或 Error 对象
+    const errMsg = typeof e === "string" ? e : (e as Error).message || String(e);
+    alert("移除文件失败: " + errMsg);
+  }
+}
+
+/** 删除文件 */
+async function handleDeleteFile(): Promise<void> {
+  const file = contextMenuFile.value;
+  if (!file) return;
+  closeContextMenu();
+  const confirmed = confirm(
+    `确定要删除文件 "${getFileName(file.path)}" 吗？\n此操作将删除本地文件，无法撤销！`
+  );
+  if (!confirmed) return;
+  try {
+    await invoke("remove_favorite_file", { id: file.id });
+    await invoke("delete_local_file", { path: file.path });
+    await loadTree();
+  } catch (e) {
+    // Tauri invoke 返回的错误可能是字符串或 Error 对象
+    const errMsg = typeof e === "string" ? e : (e as Error).message || String(e);
+    alert("删除文件失败: " + errMsg);
   }
 }
 
@@ -535,6 +559,9 @@ function onDocumentClick(event: MouseEvent): void {
         <template v-if="contextMenuTargetType === 'file'">
           <div class="context-menu-item" @click="handleRemoveFile">
             移除
+          </div>
+          <div class="context-menu-item context-menu-item--danger" @click="handleDeleteFile">
+            删除文件
           </div>
         </template>
 
@@ -784,5 +811,19 @@ function onDocumentClick(event: MouseEvent): void {
 
 .context-menu-item:hover {
   background-color: var(--button-hover-bg);
+}
+
+.context-menu-item--danger {
+  color: #d32f2f;
+}
+
+.context-menu-item--danger:hover {
+  background-color: rgba(211, 47, 47, 0.1);
+}
+
+.context-menu-divider {
+  height: 1px;
+  background-color: var(--border-color);
+  margin: 4px 0;
 }
 </style>

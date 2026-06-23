@@ -631,15 +631,20 @@ function onCollabDocumentUpdate(update: CollabDocumentUpdate): void {
   const { document, path } = update;
 
   // 如果有路径信息，尝试找到对应路径的标签页并更新
+  // 注意：只有用户明确点击共享文件列表中的文件才会打开对应标签页
+  // 此时才应该更新该标签页的内容
   if (path) {
     const targetTab = tabs.value.find((t) => t.path === path);
     if (targetTab && targetTab.content !== document) {
       targetTab.content = document;
-      return;
     }
+    // 关键修复：如果找不到对应路径的标签页，不应该 fallback 到更新当前活动标签页
+    // 否则会造成共享文件内容意外覆盖当前标签页的 bug
+    return;
   }
 
-  // 如果没有找到对应路径的标签页，或没有路径信息，更新当前活动标签页
+  // 只有当 path 为 null 时（表示"主协作文档"，即创建房间时传入的当前编辑器内容），
+  // 才应该更新当前活动标签页
   if (!activeTab.value) return;
   if (document !== activeTab.value.content) {
     activeTab.value.content = document;

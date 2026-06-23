@@ -498,8 +498,16 @@ pub fn save_image_cache(
     let file_path = cache_path.join(&file_name);
     std::fs::write(&file_path, &data).map_err(|e| format!("保存图片文件失败: {}", e))?;
 
-    // 返回相对路径，便于在 Markdown 中使用
-    Ok(file_path.to_string_lossy().to_string())
+    // 将路径转换为绝对路径，确保解析器能正确找到图片文件
+    let abs_file_path = if file_path.is_absolute() {
+        file_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|c| c.join(&file_path))
+            .unwrap_or(file_path)
+    };
+
+    Ok(abs_file_path.to_string_lossy().to_string())
 }
 
 /// 获取默认的图片缓存目录路径

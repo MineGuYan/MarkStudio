@@ -243,9 +243,6 @@ const imageCacheDir = ref<string>("");
 /** 启动时是否恢复上次打开的标签页 */
 const restoreTabsOnStartup = ref<boolean>(false);
 
-/** 默认的图片缓存目录 */
-const DEFAULT_IMAGE_CACHE_DIR = "data/image_cache/";
-
 /**
  * 设置分类与设置项配置
  *
@@ -262,10 +259,10 @@ const settingsCategories = ref([
         key: "image_cache_dir",
         label: "图片缓存目录",
         description:
-          "粘贴图片时，图片文件将保存到此目录。默认为项目根目录下的 data/image_cache/。",
+          "粘贴图片时，图片文件将保存到此目录。",
         type: "path" as const,
         value: imageCacheDir.value,
-        defaultValue: DEFAULT_IMAGE_CACHE_DIR,
+        defaultValue: "",
       },
       {
         key: "restore_tabs_on_startup",
@@ -832,6 +829,7 @@ onMounted(async () => {
       for (const setting of generalCategory.settings) {
         if (setting.key === "image_cache_dir") {
           setting.value = imageCacheDir.value;
+          setting.defaultValue = imageCacheDir.value;
         } else if (setting.key === "restore_tabs_on_startup") {
           setting.value = String(restoreTabsOnStartup.value);
         }

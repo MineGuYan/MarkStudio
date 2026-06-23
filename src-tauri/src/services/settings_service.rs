@@ -11,6 +11,33 @@ pub const DEFAULT_THEME: &str = "light";
 /// 默认图片缓存目录：相对于应用数据目录的路径
 pub const DEFAULT_IMAGE_CACHE_DIR: &str = "data/image_cache/";
 
+/// 获取默认图片缓存目录的绝对路径
+///
+/// 将相对路径 DEFAULT_IMAGE_CACHE_DIR 转换为绝对路径，
+/// 确保设置面板中显示的是完整的绝对路径。
+pub fn get_default_image_cache_dir_absolute() -> String {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    let project_root = if current_dir
+        .file_name()
+        .map(|n| n == "src-tauri")
+        .unwrap_or(false)
+    {
+        current_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| current_dir.clone())
+    } else {
+        current_dir
+    };
+
+    project_root
+        .join("data")
+        .join("image_cache")
+        .to_string_lossy()
+        .to_string()
+}
+
 /// 获取所有设置项的默认值
 ///
 /// 返回一个包含所有已知设置项默认键值对的 HashMap。
@@ -88,6 +115,20 @@ pub fn load_all_settings() -> Result<HashMap<String, String>, String> {
                 // 数据库读取失败，返回错误
                 return Err(format!("加载设置项 '{}' 失败: {}", key, e));
             }
+        }
+    }
+
+    // 将图片缓存目录路径转换为绝对路径（如果是相对路径）
+    if let Some(cache_dir) = settings.get("image_cache_dir") {
+        let path = std::path::Path::new(cache_dir);
+        if !path.is_absolute() {
+            let abs_path = std::env::current_dir()
+                .map(|c| c.join(path))
+                .unwrap_or_else(|_| path.to_path_buf());
+            settings.insert(
+                "image_cache_dir".to_string(),
+                abs_path.to_string_lossy().to_string(),
+            );
         }
     }
 

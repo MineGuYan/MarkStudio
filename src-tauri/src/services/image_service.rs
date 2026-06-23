@@ -124,8 +124,16 @@ pub fn process_paste_image(
     std::fs::write(&file_path, &data).map_err(|e| format!("保存图片文件失败: {}", e))?;
 
     // 第五步：生成 Markdown 图片语法
-    // 将 Windows 反斜杠路径转换为正斜杠，确保 Markdown 图片路径在跨平台间一致
-    let normalized_path = file_path.to_string_lossy().replace('\\', "/");
+    // 将路径转换为绝对路径，确保解析器能正确找到图片文件
+    // 然后将 Windows 反斜杠路径转换为正斜杠，确保 Markdown 图片路径在跨平台间一致
+    let abs_file_path = if file_path.is_absolute() {
+        file_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|c| c.join(&file_path))
+            .unwrap_or(file_path)
+    };
+    let normalized_path = abs_file_path.to_string_lossy().replace('\\', "/");
     let image_markdown = format!("![image]({})", normalized_path);
 
     // 第六步：在光标位置插入图片 Markdown 语法到文档内容中

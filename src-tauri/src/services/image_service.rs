@@ -82,14 +82,16 @@ pub fn generate_image_filename(ext: &str) -> String {
 ///
 /// # 示例
 /// ```
-/// let result = process_paste_image(
-///     "iVBORw0KGgo...",  // Base64 数据
-///     "image.png",
-///     "# Hello\n\nWorld",
-///     8,                   // 在 "Hello" 之后插入
-///     "",                  // 使用默认缓存目录
-///     false,               // 非协作模式
-/// )?;
+/// use markstudio_lib::services::image_service::process_paste_image;
+/// // 实际使用时传入有效的 Base64 图片数据
+/// // let result = process_paste_image(
+/// //     "有效的 Base64 图片数据",
+/// //     "image.png",
+/// //     "# Hello\n\nWorld",
+/// //     8,
+/// //     "",
+/// //     false,
+/// // ).unwrap();
 /// ```
 pub fn process_paste_image(
     base64_data: &str,

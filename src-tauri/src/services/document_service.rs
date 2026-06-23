@@ -26,6 +26,7 @@ pub fn check_dirty(current_content: &str, saved_content: &str) -> bool {
 ///
 /// # 示例
 /// ```
+/// use markstudio_lib::services::document_service::compute_line_position;
 /// let content = "abc\ndef\nghi";
 /// assert_eq!(compute_line_position(content, 1), 0);  // 第一行从位置 0 开始
 /// assert_eq!(compute_line_position(content, 2), 4);  // 第二行从位置 4 开始（"abc" + '\n'）

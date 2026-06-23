@@ -62,7 +62,7 @@ fn char_count(s: &str) -> usize {
 /// - `op`: 远程成员执行的操作
 /// - `exclude_peer_id`: 要排除的对等方 ID（通常是操作的发送者，其光标位置由发送者自己维护）
 fn adjust_peer_cursors_for_operation(
-    peers: &mut Vec<PeerInfo>,
+    peers: &mut [PeerInfo],
     op: &Operation,
     exclude_peer_id: &str,
 ) {
@@ -84,7 +84,10 @@ fn adjust_peer_cursors_for_operation(
                 let delete_len = *length;
                 if peer.cursor_position > *position {
                     // 光标在删除点之后，需要左移，但不能超过删除起始位置
-                    peer.cursor_position = peer.cursor_position.saturating_sub(delete_len).max(*position);
+                    peer.cursor_position = peer
+                        .cursor_position
+                        .saturating_sub(delete_len)
+                        .max(*position);
                 }
             }
         }
@@ -1308,10 +1311,7 @@ fn create_dual_stack_listener(port: u16) -> Result<TcpListener, String> {
         Ok(std_listener) => {
             // 成功创建 IPv6 双栈监听器，转换为 tokio TcpListener
             if let Err(e) = std_listener.set_nonblocking(true) {
-                eprintln!(
-                    "[MarkStudio] 设置非阻塞模式失败，将回退到 IPv4: {}",
-                    e
-                );
+                eprintln!("[MarkStudio] 设置非阻塞模式失败，将回退到 IPv4: {}", e);
             } else {
                 match TcpListener::from_std(std_listener) {
                     Ok(listener) => return Ok(listener),
@@ -1325,7 +1325,10 @@ fn create_dual_stack_listener(port: u16) -> Result<TcpListener, String> {
             }
         }
         Err(e) => {
-            eprintln!("[MarkStudio] 创建 IPv6 双栈监听器失败: {}，将回退到 IPv4", e);
+            eprintln!(
+                "[MarkStudio] 创建 IPv6 双栈监听器失败: {}，将回退到 IPv4",
+                e
+            );
         }
     }
 
@@ -1365,8 +1368,8 @@ fn create_socket2_listener(
     };
 
     // 创建套接字
-    let socket = Socket::new(domain, Type::STREAM, None)
-        .map_err(|e| format!("创建套接字失败: {}", e))?;
+    let socket =
+        Socket::new(domain, Type::STREAM, None).map_err(|e| format!("创建套接字失败: {}", e))?;
 
     // 设置 SO_REUSEADDR：避免 Windows 上 TIME_WAIT 状态导致端口无法立即重用
     socket
@@ -1388,9 +1391,7 @@ fn create_socket2_listener(
         .map_err(|e| format!("绑定地址 {} 失败: {}", addr, e))?;
 
     // 开始监听（backlog = 128）
-    socket
-        .listen(128)
-        .map_err(|e| format!("监听失败: {}", e))?;
+    socket.listen(128).map_err(|e| format!("监听失败: {}", e))?;
 
     // 转换为标准库 TcpListener
     Ok(socket.into())
@@ -1734,7 +1735,8 @@ async fn handle_connection(
                         // 广播更新后的对等方列表（包括调整后的光标位置）
                         if let Some(peers) = peers_to_broadcast {
                             let peer_list_msg = CollaborationMessage::PeerListUpdate { peers };
-                            let peer_list_json = serialize_message(&peer_list_msg).unwrap_or_default();
+                            let peer_list_json =
+                                serialize_message(&peer_list_msg).unwrap_or_default();
                             let clients = client_txs.lock().unwrap();
                             for (_, tx) in clients.iter() {
                                 let _ = tx.send(peer_list_json.clone());
@@ -2144,11 +2146,7 @@ mod tests {
                     // 验证是合法的 IPv4 或 IPv6 地址格式
                     let is_v4 = ip.parse::<std::net::Ipv4Addr>().is_ok();
                     let is_v6 = ip.parse::<std::net::Ipv6Addr>().is_ok();
-                    assert!(
-                        is_v4 || is_v6,
-                        "{} 既不是合法的 IPv4 也不是 IPv6 地址",
-                        ip
-                    );
+                    assert!(is_v4 || is_v6, "{} 既不是合法的 IPv4 也不是 IPv6 地址", ip);
                     if is_v4 {
                         has_v4 = true;
                     }
@@ -2172,7 +2170,10 @@ mod tests {
     #[test]
     fn test_format_ws_url_ipv4() {
         // 普通 IPv4 地址应直接拼接端口
-        assert_eq!(format_ws_url("192.168.1.100", 8080), "ws://192.168.1.100:8080");
+        assert_eq!(
+            format_ws_url("192.168.1.100", 8080),
+            "ws://192.168.1.100:8080"
+        );
         // 主机名也应直接拼接
         assert_eq!(format_ws_url("localhost", 8080), "ws://localhost:8080");
         // 127.0.0.1 本地回环
@@ -2207,16 +2208,16 @@ mod tests {
     #[test]
     fn test_format_ws_url_ipv6_link_local() {
         // IPv6 链路本地地址（fe80:: 前缀）
-        assert_eq!(
-            format_ws_url("fe80::1", 8080),
-            "ws://[fe80::1]:8080"
-        );
+        assert_eq!(format_ws_url("fe80::1", 8080), "ws://[fe80::1]:8080");
     }
 
     #[test]
     fn test_format_ws_url_trims_whitespace() {
         // 输入两端空白应被自动去除
-        assert_eq!(format_ws_url("  192.168.1.1  ", 8080), "ws://192.168.1.1:8080");
+        assert_eq!(
+            format_ws_url("  192.168.1.1  ", 8080),
+            "ws://192.168.1.1:8080"
+        );
         assert_eq!(format_ws_url("  ::1  ", 8080), "ws://[::1]:8080");
     }
 

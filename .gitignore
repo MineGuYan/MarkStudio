@@ -27,3 +27,6 @@ dist-ssr
 
 # 数据相关文件
 data
+
+# 临时文件
+temp

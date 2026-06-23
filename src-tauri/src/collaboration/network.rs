@@ -185,8 +185,7 @@ pub struct SharedFileInfo {
 ///
 /// # 示例
 /// ```
-/// use crate::collaboration::network::{CollaborationMessage, serialize_message};
-///
+/// use markstudio_lib::collaboration::network::{CollaborationMessage, serialize_message};
 /// let msg = CollaborationMessage::Heartbeat {
 ///     peer_id: "peer-1".to_string(),
 /// };
@@ -211,8 +210,7 @@ pub fn serialize_message(msg: &CollaborationMessage) -> Result<String, String> {
 ///
 /// # 示例
 /// ```
-/// use crate::collaboration::network::{CollaborationMessage, deserialize_message};
-///
+/// use markstudio_lib::collaboration::network::{CollaborationMessage, deserialize_message};
 /// let json = r#"{"type":"Heartbeat","payload":{"peer_id":"peer-1"}}"#;
 /// let msg = deserialize_message(json).unwrap();
 /// match msg {
@@ -258,7 +256,7 @@ pub fn serialize_binary(data: &[u8]) -> Vec<u8> {
 /// # 示例
 /// ```
 /// use std::time::{Duration, Instant};
-/// use crate::collaboration::network::is_heartbeat_timeout;
+/// use markstudio_lib::collaboration::network::is_heartbeat_timeout;
 ///
 /// let last = Instant::now() - Duration::from_secs(31);
 /// assert!(is_heartbeat_timeout(last, 30));

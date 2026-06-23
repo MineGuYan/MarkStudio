@@ -1,10 +1,10 @@
 // 声明模块
-mod collaboration;
+pub mod collaboration;
 mod commands;
 mod database;
 mod error;
 mod parser;
-mod services;
+pub mod services;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]

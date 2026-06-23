@@ -18,9 +18,8 @@ static IMG_SRC_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// 用于匹配块级数学公式的正则表达式（$$...$$）
-static MATH_BLOCK_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\$\$(.*?)\$\$").expect("数学块正则表达式编译失败")
-});
+static MATH_BLOCK_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\$(.*?)\$\$").expect("数学块正则表达式编译失败"));
 
 /// 用于匹配行内数学公式的正则表达式（$...$）
 ///
@@ -39,20 +38,17 @@ static MATH_BLOCK_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// 支持：$x$（单字符）、$a$ $b$（有空格连续公式）、$a+b$（含特殊字符）
 /// 已知限制：$a$b$c（无空格连续公式）由于 Rust regex 限制无法完美处理
 static MATH_INLINE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(^|[^\$])\$([^\$]+?)\$([^$]|$)")
-        .expect("行内数学正则表达式编译失败")
+    Regex::new(r"(^|[^\$])\$([^\$]+?)\$([^$]|$)").expect("行内数学正则表达式编译失败")
 });
 
 /// 用于匹配自动目录标记的正则表达式
 /// 支持 [[toc]] 和 [TOC] 两种格式（不区分大小写）
-static TOC_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\[\[?toc\]?\]").expect("目录正则表达式编译失败")
-});
+static TOC_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\[\[?toc\]?\]").expect("目录正则表达式编译失败"));
 
 /// 用于匹配 Emoji 短代码的正则表达式（:name:）
-static EMOJI_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r":([a-zA-Z0-9_]+):").expect("Emoji 正则表达式编译失败")
-});
+static EMOJI_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r":([a-zA-Z0-9_]+):").expect("Emoji 正则表达式编译失败"));
 
 /// 用于匹配 Mermaid 代码块的正则表达式
 /// 匹配 `<pre><code class="language-mermaid">...</code></pre>` 格式
@@ -63,9 +59,8 @@ static MERMAID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 
 /// 用于匹配 HTML 中 table 标签的正则表达式
 /// 将 `<table>...</table>` 包裹在 `<div class="table-wrapper">` 中
-static TABLE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)<table>(.*?)</table>"#).expect("表格正则表达式编译失败")
-});
+static TABLE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?s)<table>(.*?)</table>"#).expect("表格正则表达式编译失败"));
 
 /// 将 Markdown 文本解析为 HTML 字符串
 ///
@@ -209,9 +204,7 @@ fn resolve_image_path(image_path: &str, document_path: Option<&str>) -> std::pat
                 .unwrap_or_else(|| std::path::Path::new("."));
             doc_dir.join(image_path)
         }
-        None => {
-            std::path::Path::new(".").join(image_path)
-        }
+        None => std::path::Path::new(".").join(image_path),
     }
 }
 
@@ -376,7 +369,10 @@ fn process_mermaid_blocks(html: &mut String) {
 fn process_table_scroll(html: &mut String) {
     // 使用静态编译的正则表达式，避免每次调用时重新编译
     *html = TABLE_REGEX
-        .replace_all(html, r#"<div class="table-wrapper"><table>$1</table></div>"#)
+        .replace_all(
+            html,
+            r#"<div class="table-wrapper"><table>$1</table></div>"#,
+        )
         .to_string();
 }
 
@@ -1071,18 +1067,18 @@ mod tests {
     fn test_chinese_anchor() {
         let markdown = "# 中文标题\n## English Title\n### 混合标题 Mixed";
         let outline = extract_outline(markdown);
-        
+
         // 验证大纲提取正确
         assert_eq!(outline.len(), 3);
-        
+
         // 验证中文标题的锚点保留中文字符
         assert!(outline[0].anchor.contains("中文") || outline[0].anchor.contains("标题"));
         eprintln!("中文标题锚点: {}", outline[0].anchor);
-        
+
         // 验证英文标题的锚点为小写
         assert_eq!(outline[1].anchor, "english-title");
         eprintln!("英文标题锚点: {}", outline[1].anchor);
-        
+
         // 验证混合标题的锚点正确处理
         eprintln!("混合标题锚点: {}", outline[2].anchor);
         assert!(outline[2].anchor.contains("混合") || outline[2].anchor.contains("mixed"));
@@ -1094,20 +1090,20 @@ mod tests {
         // 纯中文
         let anchor = generate_anchor_id("中文标题");
         assert_eq!(anchor, "中文标题");
-        
+
         // 纯英文
         let anchor = generate_anchor_id("English Title");
         assert_eq!(anchor, "english-title");
-        
+
         // 混合
         let anchor = generate_anchor_id("Hello 世界");
         assert!(anchor.contains("hello"));
         assert!(anchor.contains("世界"));
-        
+
         // 包含特殊字符
         let anchor = generate_anchor_id("标题!@#$%");
         assert_eq!(anchor, "标题");
-        
+
         // 多空格
         let anchor = generate_anchor_id("A  B   C");
         assert_eq!(anchor, "a-b-c");

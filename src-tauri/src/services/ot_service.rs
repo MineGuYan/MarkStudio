@@ -57,6 +57,7 @@ pub enum Operation {
 ///
 /// # 示例
 /// ```
+/// use markstudio_lib::services::ot_service::{compute_operation, Operation};
 /// let ops = compute_operation("abc", "abxc");
 /// assert_eq!(ops.len(), 1);
 /// // ops[0] = Insert { position: 2, text: "x" }
@@ -168,6 +169,7 @@ fn char_to_byte_pos(s: &str, char_pos: usize) -> usize {
 ///
 /// # 示例
 /// ```
+/// use markstudio_lib::services::ot_service::{apply_operation, Operation};
 /// let text = "Hello World";
 /// let op = Operation::Insert {
 ///     position: 6,

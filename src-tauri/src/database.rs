@@ -542,12 +542,13 @@ pub fn rename_favorite_dir(id: i64, name: &str) -> Result<(), String> {
         .lock()
         .map_err(|e| format!("获取收藏夹数据库连接锁失败: {}", e))?;
 
-    let parent_id: Option<i64> = conn.query_row(
-        "SELECT parent_id FROM favorite_dirs WHERE id = ?1",
-        rusqlite::params![id],
-        |row| row.get(0),
-    )
-    .map_err(|e| format!("获取目录信息失败: {}", e))?;
+    let parent_id: Option<i64> = conn
+        .query_row(
+            "SELECT parent_id FROM favorite_dirs WHERE id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("获取目录信息失败: {}", e))?;
 
     let count: i64 = if let Some(pid) = parent_id {
         conn.query_row(

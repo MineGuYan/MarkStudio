@@ -440,6 +440,7 @@ fn char_to_byte_pos(s: &str, char_pos: usize) -> usize {
 ///
 /// # 示例
 /// ```
+/// use markstudio_lib::collaboration::ot::{Operation, apply_operation};
 /// let text = "Hello World";
 /// let op = Operation::Insert { position: 6, text: "Beautiful ".to_string() };
 /// assert_eq!(apply_operation(text, &op), "Hello Beautiful World");
@@ -506,6 +507,7 @@ pub fn apply_operation(text: &str, op: &Operation) -> String {
 ///
 /// # 示例
 /// ```
+/// use markstudio_lib::collaboration::ot::{Operation, compose_operations};
 /// let ops = vec![
 ///     Operation::Insert { position: 0, text: "Hello".to_string() },
 ///     Operation::Insert { position: 5, text: " World".to_string() },

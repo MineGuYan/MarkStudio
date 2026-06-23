@@ -138,8 +138,6 @@ pub fn get_collab_cache_dir() -> Result<PathBuf, String> {
 ///
 /// # 示例
 /// ```
-/// use crate::collaboration::sync::prepare_image_sync;
-///
 /// // 假设存在图片文件
 /// // let (name, chunks, size) = prepare_image_sync("photo.png").unwrap();
 /// // assert!(!chunks.is_empty());

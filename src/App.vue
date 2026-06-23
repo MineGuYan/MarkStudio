@@ -1457,7 +1457,7 @@ body,
 
 .settings-overlay {
   position: absolute;
-  top: 84px;
+  top: 48px;
   left: 0;
   right: 0;
   bottom: 0;
